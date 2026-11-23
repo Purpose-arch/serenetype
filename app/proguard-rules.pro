@@ -1,0 +1,3 @@
+-keep class com.serenetype.keyboard.ime.SereneInputMethodService { *; }
+-keep class com.serenetype.keyboard.ui.MainActivity { *; }
+-dontwarn org.json.**
