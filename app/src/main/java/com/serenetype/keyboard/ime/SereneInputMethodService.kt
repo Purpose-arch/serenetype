@@ -279,7 +279,13 @@ class SereneInputMethodService : InputMethodService(),
                         performHaptic(latestConfig)
                         session.finishWord(null)
                         session.lastCorrection = null
-                        currentInputConnection?.commitText(emoji, 1)
+                        currentCandidates = emptyList()
+                        currentInputConnection?.let { ic ->
+                            ic.beginBatchEdit()
+                            ic.finishComposingText()
+                            ic.commitText(emoji, 1)
+                            ic.endBatchEdit()
+                        }
                         serviceScope.launch { repository.recordRecentEmoji(emoji) }
                         Unit
                     }
@@ -561,12 +567,27 @@ class SereneInputMethodService : InputMethodService(),
         if (!selected.isNullOrEmpty()) {
             ic.commitText("", 1)
         } else {
-            ic.deleteSurroundingText(1, 0)
+            val before = runCatching { ic.getTextBeforeCursor(16, 0)?.toString() }.getOrNull()
+            val deleteCount = if (!before.isNullOrEmpty()) lastGraphemeLength(before) else 1
+            ic.deleteSurroundingText(deleteCount, 0)
         }
         if (!isPasswordField && config.autoCap && shouldAutoCap() && shiftState == 0) {
             shiftState = 1
         } else if (!config.autoCap && shiftState == 1) {
             shiftState = 0
+        }
+    }
+
+    private fun lastGraphemeLength(text: String): Int {
+        if (text.isEmpty()) return 1
+        val it = android.icu.text.BreakIterator.getCharacterInstance()
+        it.setText(text)
+        val end = it.last()
+        val prev = it.previous()
+        return if (prev != android.icu.text.BreakIterator.DONE && end > prev) {
+            end - prev
+        } else {
+            1
         }
     }
 
