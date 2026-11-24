@@ -1071,7 +1071,7 @@ private fun KeyboardMiniPreview(
 ) {
     val fontFamily = when (config.fontStyle) {
         KeyFontStyle.SYSTEM_SANS -> FontFamily.SansSerif
-        KeyFontStyle.ROUNDED -> FontFamily.SansSerif
+        KeyFontStyle.ROUNDED -> FontFamily.Serif
         KeyFontStyle.MONOSPACE -> FontFamily.Monospace
     }
     val keyRadius = (config.cornerRadiusDp * 0.85f).dp

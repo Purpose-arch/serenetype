@@ -611,7 +611,7 @@ private fun HorizontalReorderRow(
                         val maxDx = (itemRects[list.lastOrNull()]?.right ?: startRect.right) - startRect.right
                         dragOffsetX = (dragOffsetX + dragAmount.x).coerceIn(minDx, maxDx)
 
-                        val fingerX = startRect.center.x + dragOffsetX
+                        val fingerX = change.position.x
                         var newIdx = 0
                         for (id in list) {
                             if (id == activeId) continue
@@ -661,16 +661,22 @@ private fun HorizontalReorderRow(
                         .height(itemHeight)
                         .zIndex(if (isDraggingThis) 12f else 0f)
                         .onGloballyPositioned { coords ->
-                            val b = coords.boundsInRoot()
-                            itemRects[btnId] = Rect(
-                                b.left - rowOrigin.x,
-                                b.top - rowOrigin.y,
-                                b.right - rowOrigin.x,
-                                b.bottom - rowOrigin.y
-                            )
+                            if (draggingId == null) {
+                                val b = coords.boundsInRoot()
+                                itemRects[btnId] = Rect(
+                                    b.left - rowOrigin.x,
+                                    b.top - rowOrigin.y,
+                                    b.right - rowOrigin.x,
+                                    b.bottom - rowOrigin.y
+                                )
+                            }
                         }
                         .graphicsLayer {
-                            translationX = if (isDraggingThis) dragOffsetX else siblingShiftX
+                            translationX = when {
+                                isDraggingThis -> dragOffsetX
+                                activeId != null -> siblingShiftX
+                                else -> 0f
+                            }
                             scaleX = dragScale
                             scaleY = dragScale
                         }

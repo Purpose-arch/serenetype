@@ -75,7 +75,19 @@ class SereneInputMethodService : InputMethodService(),
     private var isPasswordField = false
     private var isNoSuggestions = false
 
+    private data class UndoOp(val deletedBefore: String, val committed: String)
+
     private val session = ComposingSession()
+    private val undoStack = ArrayDeque<UndoOp>()
+
+    private fun pushUndo(deletedBefore: String, committed: String) {
+        if (isPasswordField) return
+        if (deletedBefore.isEmpty() && committed.isEmpty()) return
+        undoStack.addLast(UndoOp(deletedBefore, committed))
+        if (undoStack.size > 50) {
+            undoStack.removeFirst()
+        }
+    }
     private var cachedPriorsWord: String = ""
     private var cachedPriorsLang: String = ""
     private var cachedPriorsMap: Map<Char, Float> = emptyMap()
@@ -164,6 +176,8 @@ class SereneInputMethodService : InputMethodService(),
         if (!fromListener) {
             if (timestamp > 0L && timestamp == lastCapturedClipTimestamp) return
             if (timestamp <= 0L && text == lastCapturedClipText) return
+        } else {
+            if (timestamp > 0L && timestamp == lastCapturedClipTimestamp && text == lastCapturedClipText) return
         }
         lastCapturedClipText = text
         if (timestamp > 0L) lastCapturedClipTimestamp = timestamp
@@ -285,6 +299,7 @@ class SereneInputMethodService : InputMethodService(),
                             ic.finishComposingText()
                             ic.commitText(emoji, 1)
                             ic.endBatchEdit()
+                            pushUndo("", emoji)
                         }
                         serviceScope.launch { repository.recordRecentEmoji(emoji) }
                         Unit
@@ -353,7 +368,10 @@ class SereneInputMethodService : InputMethodService(),
                     { text: String ->
                         performHaptic(latestConfig)
                         session.resetAll()
-                        currentInputConnection?.commitText(text, 1)
+                        currentInputConnection?.let { ic ->
+                            ic.commitText(text, 1)
+                            pushUndo("", text)
+                        }
                         Unit
                     }
                 }
@@ -405,7 +423,7 @@ class SereneInputMethodService : InputMethodService(),
                     config = config,
                     palette = palette,
                     shiftState = shiftState,
-                    clipboardHistory = clipHistory,
+                    clipboardHistory = clipHistory.toList(),
                     pinnedClips = pinnedClips,
                     candidates = currentCandidates,
                     recentEmojis = recentEmojis,
@@ -468,14 +486,17 @@ class SereneInputMethodService : InputMethodService(),
         val ic = currentInputConnection ?: return
         val cur = session.currentWord
         ic.beginBatchEdit()
+        var deletedCur = ""
         if (cur.isNotEmpty()) {
             val before = runCatching { ic.getTextBeforeCursor(cur.length, 0)?.toString() }.getOrNull()
             if (before != null && before.equals(cur, ignoreCase = true)) {
                 ic.deleteSurroundingText(cur.length, 0)
+                deletedCur = before
             }
         }
         ic.commitText("$cand ", 1)
         ic.endBatchEdit()
+        pushUndo(deletedCur, "$cand ")
         dictionary.learnWord(cand, cfg.activeLanguage, prevWord1 = session.prevWord1, prevWord2 = session.prevWord2)
         session.finishWord(cand, " ")
         session.lastCorrection = null
@@ -500,10 +521,12 @@ class SereneInputMethodService : InputMethodService(),
                 }
                 if (matched != null && ic != null) {
                     val deleteBefore = (matched.trigger.length - ch.length).coerceAtLeast(0)
+                    val deletedText = if (deleteBefore > 0) before.takeLast(deleteBefore) else ""
                     ic.beginBatchEdit()
                     if (deleteBefore > 0) ic.deleteSurroundingText(deleteBefore, 0)
                     ic.commitText(matched.expansion, 1)
                     ic.endBatchEdit()
+                    pushUndo(deletedText, matched.expansion)
                     session.finishWord(null)
                     session.lastCorrection = null
                     if (config.autoCap && (ch == "." || ch == "!" || ch == "?") && shiftState == 0 && shouldAutoCap()) {
@@ -521,7 +544,10 @@ class SereneInputMethodService : InputMethodService(),
 
         session.lastCorrection = null
         val out = if (shiftState > 0) ch.uppercase() else ch
-        currentInputConnection?.commitText(out, 1)
+        currentInputConnection?.let { ic ->
+            ic.commitText(out, 1)
+            pushUndo("", out)
+        }
         if (out.length == 1 && out[0].isLetter()) {
             session.appendChar(out[0], touchX, touchY)
         } else {
@@ -566,10 +592,13 @@ class SereneInputMethodService : InputMethodService(),
         val selected = runCatching { ic.getSelectedText(0) }.getOrNull()
         if (!selected.isNullOrEmpty()) {
             ic.commitText("", 1)
+            pushUndo(selected.toString(), "")
         } else {
             val before = runCatching { ic.getTextBeforeCursor(16, 0)?.toString() }.getOrNull()
             val deleteCount = if (!before.isNullOrEmpty()) lastGraphemeLength(before) else 1
+            val deletedText = if (!before.isNullOrEmpty()) before.takeLast(deleteCount.coerceAtMost(before.length)) else ""
             ic.deleteSurroundingText(deleteCount, 0)
+            if (deletedText.isNotEmpty()) pushUndo(deletedText, "")
         }
         if (!isPasswordField && config.autoCap && shouldAutoCap() && shiftState == 0) {
             shiftState = 1
@@ -607,7 +636,9 @@ class SereneInputMethodService : InputMethodService(),
             dictionary.rejectWord(deletedWord, config.activeLanguage)
         }
         val deleteLen = (before.length - idx).coerceAtLeast(1)
+        val deletedSlice = before.substring((before.length - deleteLen).coerceAtLeast(0))
         ic.deleteSurroundingText(deleteLen, 0)
+        pushUndo(deletedSlice, "")
         if (!isPasswordField && config.autoCap && shouldAutoCap() && shiftState == 0) {
             shiftState = 1
         }
@@ -641,6 +672,7 @@ class SereneInputMethodService : InputMethodService(),
             ic.deleteSurroundingText(1, 0)
             ic.commitText(". ", 1)
             ic.endBatchEdit()
+            pushUndo(" ", ". ")
             if (config.autoCap) shiftState = 1
         } else {
             commitWithAutocorrect(" ", config, prefetchedBefore = before)
@@ -699,6 +731,7 @@ class SereneInputMethodService : InputMethodService(),
                         ic.deleteSurroundingText(trig.length, 0)
                         ic.commitText(snippet.expansion + separator, 1)
                         ic.endBatchEdit()
+                        pushUndo(trig, snippet.expansion + separator)
                         session.finishWord(null)
                         session.lastCorrection = null
                         return
@@ -727,6 +760,7 @@ class SereneInputMethodService : InputMethodService(),
                 ic.deleteSurroundingText(word.length, 0)
                 ic.commitText(suggestion + separator, 1)
                 ic.endBatchEdit()
+                pushUndo(word, suggestion + separator)
                 session.finishWord(suggestion, separator)
                 currentCandidates = emptyList()
                 session.lastCorrection = LastCorrection(word, suggestion, separator)
@@ -741,6 +775,7 @@ class SereneInputMethodService : InputMethodService(),
         session.lastCorrection = null
         currentCandidates = emptyList()
         ic.commitText(separator, 1)
+        pushUndo("", separator)
     }
 
     private fun extractTrailingWord(before: String): String {
@@ -786,10 +821,36 @@ class SereneInputMethodService : InputMethodService(),
             }
             "CUT" -> ic.performContextMenuAction(android.R.id.cut)
             "UNDO" -> {
-                if (!ic.performContextMenuAction(android.R.id.undo)) {
+                var handled = false
+                if (undoStack.isNotEmpty()) {
+                    val op = undoStack.last()
+                    val canRevert = if (op.committed.isEmpty()) {
+                        true
+                    } else {
+                        runCatching { ic.getTextBeforeCursor(op.committed.length, 0)?.toString() }.getOrNull() == op.committed
+                    }
+                    if (canRevert) {
+                        undoStack.removeLast()
+                        ic.beginBatchEdit()
+                        if (op.committed.isNotEmpty()) {
+                            ic.deleteSurroundingText(op.committed.length, 0)
+                        }
+                        if (op.deletedBefore.isNotEmpty()) {
+                            ic.commitText(op.deletedBefore, 1)
+                        }
+                        ic.endBatchEdit()
+                        session.resetAll()
+                        currentCandidates = emptyList()
+                        handled = true
+                    } else {
+                        undoStack.clear()
+                    }
+                }
+                if (!handled && !ic.performContextMenuAction(android.R.id.undo)) {
                     val now = android.os.SystemClock.uptimeMillis()
-                    ic.sendKeyEvent(KeyEvent(now, now, KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_Z, 0, KeyEvent.META_CTRL_ON))
-                    ic.sendKeyEvent(KeyEvent(now, now, KeyEvent.ACTION_UP, KeyEvent.KEYCODE_Z, 0, KeyEvent.META_CTRL_ON))
+                    val meta = KeyEvent.META_CTRL_ON or KeyEvent.META_CTRL_LEFT_ON
+                    ic.sendKeyEvent(KeyEvent(now, now, KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_Z, 0, meta))
+                    ic.sendKeyEvent(KeyEvent(now, now, KeyEvent.ACTION_UP, KeyEvent.KEYCODE_Z, 0, meta))
                 }
             }
         }
@@ -800,7 +861,9 @@ class SereneInputMethodService : InputMethodService(),
         if (lifecycleRegistry.currentState == Lifecycle.State.CREATED) {
             lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_START)
         }
-        lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_RESUME)
+        if (lifecycleRegistry.currentState != Lifecycle.State.RESUMED) {
+            lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_RESUME)
+        }
 
         val inputType = info?.inputType ?: InputType.TYPE_NULL
         val inputClass = inputType and InputType.TYPE_MASK_CLASS
@@ -814,6 +877,7 @@ class SereneInputMethodService : InputMethodService(),
 
         captureClipboard()
         session.resetAll()
+        undoStack.clear()
         cachedPriorsWord = ""
         currentCandidates = emptyList()
         shiftState = if (!isPasswordField && latestConfig.autoCap && shouldAutoCap()) 1 else 0
@@ -822,6 +886,7 @@ class SereneInputMethodService : InputMethodService(),
     override fun onFinishInputView(finishingInput: Boolean) {
         super.onFinishInputView(finishingInput)
         session.resetAll()
+        undoStack.clear()
         currentCandidates = emptyList()
         dictionary.flushUserDictAsync()
         saveTouchBiasAsync()
@@ -831,7 +896,9 @@ class SereneInputMethodService : InputMethodService(),
 
     override fun onDestroy() {
         clipboardManager.removePrimaryClipChangedListener(clipListener)
-        lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_DESTROY)
+        if (lifecycleRegistry.currentState.isAtLeast(Lifecycle.State.CREATED)) {
+            lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_DESTROY)
+        }
         store.clear()
         serviceScope.cancel()
         hapticScope.cancel()

@@ -160,7 +160,7 @@ fun KeyboardUI(
 
     val fontFamily = when (config.fontStyle) {
         KeyFontStyle.SYSTEM_SANS -> FontFamily.SansSerif
-        KeyFontStyle.ROUNDED -> FontFamily.SansSerif
+        KeyFontStyle.ROUNDED -> FontFamily.Serif
         KeyFontStyle.MONOSPACE -> FontFamily.Monospace
     }
 
@@ -369,6 +369,14 @@ fun KeyboardUI(
                     val latestOnTouchSample by rememberUpdatedState(onTouchSample)
                     val latestOnGeometryUpdate by rememberUpdatedState(onKeyGeometryUpdate)
                     val latestOnCharWithPos by rememberUpdatedState(onCharWithPos)
+
+                    DisposableEffect(currentLayer, config.activeLanguage) {
+                        onDispose {
+                            pointerQueue.clear()
+                            pressedKeyCounts.clear()
+                            gridAltsKey = null
+                        }
+                    }
 
                     LaunchedEffect(keyDetector.boundsVersion) {
                         if (useUnifiedGrid && keyDetector.boundsVersion > 0) {
@@ -1314,13 +1322,13 @@ private fun ClipboardPanel(
     val scope = rememberCoroutineScope()
     val density = LocalDensity.current
     val pagerState = rememberPagerState(initialPage = 0, pageCount = { 2 })
-    val recentClips = remember(clips, pinnedClips) {
-        val pinnedSet = pinnedClips.toHashSet()
-        clips.filter { it !in pinnedSet }
-    }
+    val pinnedSet = remember(pinnedClips) { pinnedClips.toHashSet() }
+    val recentClips = clips.filter { it !in pinnedSet }
     val rowCount = if (config.showNumberRow) 5 else 4
     val totalHeight = (config.keyHeightDp * rowCount + config.verticalGapDp * (rowCount - 1)).dp
     val pinnedLabel = "pinned"
+    val latestOnRemove by rememberUpdatedState(onRemove)
+    val latestOnRemovePinned by rememberUpdatedState(onRemovePinned)
 
     Column(
         modifier = Modifier
@@ -1456,7 +1464,7 @@ private fun ClipboardPanel(
                                             wasArmed = false
                                             dragX = 0f
                                             if (triggered) {
-                                                if (page == 0) onRemove(item) else onRemovePinned(item)
+                                                if (page == 0) latestOnRemove(item) else latestOnRemovePinned(item)
                                             }
                                         },
                                         onDragCancel = {
@@ -2374,10 +2382,14 @@ private fun IosEmojiPickerPanel(
 
     val rowCount = if (config.showNumberRow) 5 else 4
     val panelHeight = (config.keyHeightDp * rowCount + config.verticalGapDp * (rowCount - 1)).dp
-    val emojiTextStyle = LocalTextStyle.current.copy(
-        fontFamily = emojiFontFamily,
-        platformStyle = PlatformTextStyle(emojiSupportMatch = EmojiSupportMatch.None)
-    )
+    val baseTextStyle = LocalTextStyle.current
+    val emojiTextStyle = remember(emojiFontFamily, baseTextStyle) {
+        baseTextStyle.copy(
+            fontFamily = emojiFontFamily,
+            platformStyle = PlatformTextStyle(emojiSupportMatch = EmojiSupportMatch.None)
+        )
+    }
+    val latestOnEmojiClick by rememberUpdatedState(onEmojiClick)
 
     Column(
         modifier = Modifier
@@ -2412,7 +2424,7 @@ private fun IosEmojiPickerPanel(
                             .height(40.dp)
                             .clip(RoundedCornerShape(8.dp))
                             .pointerInput(emoji) {
-                                detectTapGestures(onTap = { onEmojiClick(emoji) })
+                                detectTapGestures(onTap = { latestOnEmojiClick(emoji) })
                             },
                         contentAlignment = Alignment.Center
                     ) {

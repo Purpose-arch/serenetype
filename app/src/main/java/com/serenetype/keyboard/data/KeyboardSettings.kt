@@ -36,7 +36,7 @@ enum class CandidateBarMode(val label: String) {
 
 enum class KeyFontStyle(val label: String) {
     SYSTEM_SANS("system"),
-    ROUNDED("rounded"),
+    ROUNDED("serif"),
     MONOSPACE("mono")
 }
 

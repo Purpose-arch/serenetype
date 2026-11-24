@@ -153,6 +153,10 @@ class BinaryDict private constructor(
 
     private val charBigrams: Map<Char, Map<Char, Float>> by lazy { parseBigrams() }
 
+    fun warmUp() {
+        charBigrams.size
+    }
+
     private fun parseBigrams(): Map<Char, Map<Char, Float>> {
         if (bigramOffset <= 0 || bigramOffset + 2 > buf.capacity()) return emptyMap()
         val res = HashMap<Char, Map<Char, Float>>()

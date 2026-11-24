@@ -72,22 +72,24 @@ object EmojiFontManager {
                     readTimeout = 30_000
                     instanceFollowRedirects = true
                 }
-                conn.connect()
-                if (conn.responseCode !in 200..299) {
-                    conn.disconnect()
-                    return@runCatching false
-                }
-                BufferedInputStream(conn.inputStream, 32 * 1024).use { input ->
-                    BufferedOutputStream(tmp.outputStream(), 32 * 1024).use { output ->
-                        val buf = ByteArray(32 * 1024)
-                        while (true) {
-                            val read = input.read(buf)
-                            if (read < 0) break
-                            output.write(buf, 0, read)
+                try {
+                    conn.connect()
+                    if (conn.responseCode !in 200..299) {
+                        return@runCatching false
+                    }
+                    BufferedInputStream(conn.inputStream, 32 * 1024).use { input ->
+                        BufferedOutputStream(tmp.outputStream(), 32 * 1024).use { output ->
+                            val buf = ByteArray(32 * 1024)
+                            while (true) {
+                                val read = input.read(buf)
+                                if (read < 0) break
+                                output.write(buf, 0, read)
+                            }
                         }
                     }
+                } finally {
+                    conn.disconnect()
                 }
-                conn.disconnect()
 
                 if (!tmp.exists() || tmp.length() < MIN_VALID_BYTES) {
                     tmp.delete()

@@ -178,7 +178,10 @@ class DictionaryEngine private constructor(private val context: Context) {
         }
 
         if (sdictFile.exists()) {
-            BinaryDict.open(sdictFile)?.let { binaryDicts[lang] = it }
+            BinaryDict.open(sdictFile)?.let { dict ->
+                dict.warmUp()
+                binaryDicts[lang] = dict
+            }
         }
     }
 
@@ -649,27 +652,29 @@ class DictionaryEngine private constructor(private val context: Context) {
                     readTimeout = 45_000
                     instanceFollowRedirects = true
                 }
-                conn.connect()
-                if (conn.responseCode !in 200..299) {
-                    conn.disconnect()
-                    return@runCatching false
-                }
                 val extFile = File(downloadedDir, "${lang}_ext.txt")
                 val tmpFile = File(downloadedDir, "${lang}_ext.tmp")
                 var linesWritten = 0
-                conn.inputStream.bufferedReader().use { reader ->
-                    tmpFile.bufferedWriter().use { writer ->
-                        while (linesWritten < MAX_EXT_WORDS) {
-                            val line = reader.readLine() ?: break
-                            if (line.isNotBlank()) {
-                                writer.write(line)
-                                writer.newLine()
-                                linesWritten++
+                try {
+                    conn.connect()
+                    if (conn.responseCode !in 200..299) {
+                        return@runCatching false
+                    }
+                    conn.inputStream.bufferedReader().use { reader ->
+                        tmpFile.bufferedWriter().use { writer ->
+                            while (linesWritten < MAX_EXT_WORDS) {
+                                val line = reader.readLine() ?: break
+                                if (line.isNotBlank()) {
+                                    writer.write(line)
+                                    writer.newLine()
+                                    linesWritten++
+                                }
                             }
                         }
                     }
+                } finally {
+                    conn.disconnect()
                 }
-                conn.disconnect()
                 if (linesWritten < 500) {
                     tmpFile.delete()
                     return@runCatching false

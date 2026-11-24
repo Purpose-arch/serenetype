@@ -70,23 +70,11 @@ class KeyDetector {
     ): Pair<String, Rect>? {
         if (keyBounds.isEmpty()) return null
 
-        // Pass 1: 60% Sacred Core check (inner 60% of key rect is unconditionally honored)
-        for ((key, rect) in keyBounds) {
-            val w = rect.width.coerceAtLeast(1f)
-            val h = rect.height.coerceAtLeast(1f)
-            val ch = if (key.length == 1) key[0].lowercaseChar() else null
-            val bias = if (ch != null) biasProvider(ch) else null
-            val cx = rect.center.x + (bias?.first ?: 0f)
-            val cy = rect.center.y + (bias?.second ?: 0f)
-            if (abs(rootPos.x - cx) <= w * 0.30f && abs(rootPos.y - cy) <= h * 0.30f) {
-                return key to rect
-            }
-        }
-
-        // Pass 2: Border / gap arbitration with bounded language prior
+        // Combined single-pass: 60% Sacred Core early-return + border/gap arbitration
         var bestKey: String? = null
         var bestRect: Rect? = null
         var bestScore = Float.NEGATIVE_INFINITY
+        val usePriors = alphaWeight > 0f && priors.isNotEmpty()
 
         for ((key, rect) in keyBounds) {
             val w = rect.width.coerceAtLeast(1f)
@@ -98,13 +86,16 @@ class KeyDetector {
 
             val rawDx = abs(rootPos.x - cx)
             val rawDy = abs(rootPos.y - cy)
+            if (rawDx <= w * 0.30f && rawDy <= h * 0.30f) {
+                return key to rect
+            }
             if (rawDx > w * 1.40f || rawDy > h * 0.85f) continue
 
             val nx = rawDx / (w * 0.50f)
             val ny = rawDy / (h * 0.52f)
             val spatialScore = -0.5f * (nx * nx + ny * ny)
 
-            val priorBonus = if (alphaWeight > 0f && priors.isNotEmpty() && ch != null && ch.isLetter()) {
+            val priorBonus = if (usePriors && ch != null && ch.isLetter()) {
                 val p = (priors[ch] ?: 0.01f).coerceAtLeast(0.01f)
                 (alphaWeight * 0.32f * ln(p)).coerceIn(-1.35f, 1.35f)
             } else 0f
