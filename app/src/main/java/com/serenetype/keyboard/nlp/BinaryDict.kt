@@ -273,6 +273,8 @@ class BinaryDict private constructor(
         val maxSearchDist = if (avgKeyWidthPx > 1f) avgKeyWidthPx * 2.45f else Float.MAX_VALUE
         val adjDist = if (avgKeyWidthPx > 1f) avgKeyWidthPx * 1.40f else Float.MAX_VALUE
         val pathBuf = CharArray(len + 2)
+        var dfsVisits = 0
+        val maxDfsVisits = 2500
 
         fun spatialBonusForChar(idx: Int, candCh: Char, typedCh: Char): Int {
             if (avgKeyWidthPx <= 1f) return 0
@@ -288,7 +290,8 @@ class BinaryDict private constructor(
         }
 
         fun dfs(nodeOff: Int, wordIdx: Int, depth: Int, editsLeft: Int, bonusScore: Int) {
-            if (depth >= pathBuf.size) return
+            if (depth >= pathBuf.size || dfsVisits >= maxDfsVisits) return
+            dfsVisits++
 
             if (wordIdx == len) {
                 val freq = buf.getShort(nodeOff).toInt() and 0xFFFF

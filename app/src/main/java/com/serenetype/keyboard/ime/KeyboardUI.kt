@@ -57,6 +57,7 @@ import androidx.compose.ui.input.pointer.changedToDown
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.EmojiSupportMatch
@@ -167,10 +168,12 @@ fun KeyboardUI(
     var quickSymSelectedIdx by remember { mutableIntStateOf(-1) }
     var quickSymOverlayBounds by remember { mutableStateOf<Rect?>(null) }
     var quickSymAnchorX by remember { mutableFloatStateOf(0f) }
+    var rootWidthPx by remember { mutableFloatStateOf(0f) }
 
     Box(
         modifier = Modifier
             .fillMaxWidth()
+            .onSizeChanged { rootWidthPx = it.width.toFloat() }
             .background(palette.trayBackground)
     ) {
         Column(
@@ -339,6 +342,7 @@ fun KeyboardUI(
                             .then(
                                 if (useUnifiedGrid) {
                                     Modifier.drawBehind {
+                                        keyDetector.boundsVersion
                                         val boundsMap = keyDetector.getAllBounds()
                                         val cr = CornerRadius(cornerPx, cornerPx)
                                         val showShadow = config.showKeyShadow
@@ -527,22 +531,33 @@ fun KeyboardUI(
                             ),
                         verticalArrangement = Arrangement.spacedBy(config.verticalGapDp.dp)
                     ) {
+                        BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+                            val gridMaxWidth = maxWidth
+                            val gapDp = config.horizontalGapDp.dp
+                            val unitKeyWidth = ((gridMaxWidth - gapDp * (maxRowLen - 1)) / maxRowLen).coerceAtLeast(24.dp)
+
+                            Column(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalArrangement = Arrangement.spacedBy(config.verticalGapDp.dp)
+                            ) {
                         rows.forEach { rowKeys ->
+                            val hasFuncKeys = rowKeys.any { it == "SHIFT" || it == "BACK" || it == "ALT_SYM" || it == "ALT_123" }
                             val letterKeysInRow = rowKeys.count { it != "SHIFT" && it != "BACK" && it != "ALT_SYM" && it != "ALT_123" }
-                            val funcWeight = if (rowKeys.contains("SHIFT") || rowKeys.contains("ALT_SYM") || rowKeys.contains("ALT_123")) {
-                                ((maxRowLen - letterKeysInRow) / 2f).coerceIn(1.35f, 1.85f)
-                            } else 1.45f
+                            val funcWidth = if (hasFuncKeys) {
+                                val remaining = gridMaxWidth - unitKeyWidth * letterKeysInRow - gapDp * (rowKeys.size - 1)
+                                (remaining / 2f).coerceAtLeast(unitKeyWidth)
+                            } else unitKeyWidth
 
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(config.horizontalGapDp.dp),
+                                horizontalArrangement = Arrangement.spacedBy(gapDp, Alignment.CenterHorizontally),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 rowKeys.forEach { key ->
                                     when (key) {
                                         "SHIFT" -> {
                                             FuncKeyCap(
-                                                modifier = Modifier.weight(funcWeight),
+                                                modifier = Modifier.width(funcWidth),
                                                 height = config.keyHeightDp.dp,
                                                 radius = config.funcCornerRadiusDp.dp,
                                                 config = config,
@@ -561,7 +576,7 @@ fun KeyboardUI(
 
                                         "BACK" -> {
                                             BackspaceKeyCap(
-                                                modifier = Modifier.weight(funcWeight),
+                                                modifier = Modifier.width(funcWidth),
                                                 height = config.keyHeightDp.dp,
                                                 radius = config.funcCornerRadiusDp.dp,
                                                 config = config,
@@ -573,7 +588,7 @@ fun KeyboardUI(
 
                                         "ALT_SYM" -> {
                                             FuncKeyCap(
-                                                modifier = Modifier.weight(funcWeight),
+                                                modifier = Modifier.width(funcWidth),
                                                 height = config.keyHeightDp.dp,
                                                 radius = config.funcCornerRadiusDp.dp,
                                                 config = config,
@@ -595,7 +610,7 @@ fun KeyboardUI(
 
                                         "ALT_123" -> {
                                             FuncKeyCap(
-                                                modifier = Modifier.weight(funcWeight),
+                                                modifier = Modifier.width(funcWidth),
                                                 height = config.keyHeightDp.dp,
                                                 radius = config.funcCornerRadiusDp.dp,
                                                 config = config,
@@ -622,7 +637,7 @@ fun KeyboardUI(
                                             val alts = KeyboardLayouts.altChars[key.lowercase()].orEmpty()
 
                                             CharKeyCap(
-                                                modifier = Modifier.weight(1f),
+                                                modifier = Modifier.width(unitKeyWidth),
                                                 label = label,
                                                 alts = alts,
                                                 uppercaseAlts = currentLayer == KeyboardLayer.LETTERS && shiftState > 0,
@@ -652,6 +667,8 @@ fun KeyboardUI(
                                         }
                                     }
                                 }
+                            }
+                        }
                             }
                         }
                     }
@@ -851,6 +868,7 @@ fun KeyboardUI(
                 controller = previewController,
                 palette = palette,
                 fontFamily = fontFamily,
+                containerWidthPx = rootWidthPx,
                 modifier = Modifier
                     .align(Alignment.TopStart)
                     .zIndex(40f)
@@ -924,6 +942,7 @@ private fun KeyPreviewOverlay(
     controller: KeyPreviewController,
     palette: KeyboardPalette,
     fontFamily: FontFamily,
+    containerWidthPx: Float,
     modifier: Modifier = Modifier
 ) {
     val density = LocalDensity.current
@@ -950,7 +969,8 @@ private fun KeyPreviewOverlay(
                     alpha = 0f
                 } else {
                     alpha = 1f
-                    translationX = (p.centerX - boxWPx / 2f).coerceAtLeast(minXPx)
+                    val maxXPx = if (containerWidthPx > boxWPx + minXPx * 2f) containerWidthPx - boxWPx - minXPx else minXPx
+                    translationX = (p.centerX - boxWPx / 2f).coerceIn(minXPx, maxXPx)
                     translationY = (p.topY - boxHPx - gapYPx).coerceAtLeast(minYPx)
                 }
             }

@@ -1,5 +1,8 @@
 package com.serenetype.keyboard.input
 
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import kotlin.math.abs
@@ -19,9 +22,15 @@ class KeyDetector {
         private set
     var avgKeyHeightPx: Float = 0f
         private set
+    var boundsVersion: Int by mutableIntStateOf(0)
+        private set
 
     fun updateKeyBounds(key: String, rect: Rect) {
-        keyBounds[key] = rect
+        val prev = keyBounds[key]
+        if (prev != rect) {
+            keyBounds[key] = rect
+            boundsVersion++
+        }
     }
 
     fun clear() {
@@ -29,6 +38,7 @@ class KeyDetector {
         keyCenters.clear()
         avgKeyWidthPx = 0f
         avgKeyHeightPx = 0f
+        boundsVersion++
     }
 
     fun snapshotGeometry(): Pair<Map<Char, Pair<Float, Float>>, Float> {

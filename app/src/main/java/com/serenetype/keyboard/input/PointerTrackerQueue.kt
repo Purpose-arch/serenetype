@@ -98,10 +98,10 @@ class TypingTimeRecorder {
     private var lastKeyInputMs = 0L
 
     fun onKeyInput(nowMs: Long): Boolean {
-        val isFastBurst = (nowMs - lastKeyInputMs) in 1L..95L
+        val isFastBurst = lastKeyInputMs > 0L && (nowMs - lastKeyInputMs) in 0L..95L
         lastKeyInputMs = nowMs
         return isFastBurst
     }
 
-    fun isInFastBurst(nowMs: Long): Boolean = (nowMs - lastKeyInputMs) in 1L..95L
+    fun isInFastBurst(nowMs: Long): Boolean = lastKeyInputMs > 0L && (nowMs - lastKeyInputMs) in 0L..95L
 }

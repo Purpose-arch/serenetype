@@ -71,6 +71,9 @@ class SereneInputMethodService : InputMethodService(),
     private var isNoSuggestions = false
 
     private val session = ComposingSession()
+    private var cachedPriorsWord: String = ""
+    private var cachedPriorsLang: String = ""
+    private var cachedPriorsMap: Map<Char, Float> = emptyMap()
     private var keyCentersMap: Map<Char, Pair<Float, Float>> = emptyMap()
     private var avgKeyWidthPx: Float = 0f
 
@@ -193,6 +196,8 @@ class SereneInputMethodService : InputMethodService(),
                 }
                 SideEffect {
                     latestConfig = config
+                }
+                LaunchedEffect(config.textExpanderEnabled, config.textSnippets) {
                     instantEndChars = if (config.textExpanderEnabled) {
                         config.textSnippets.mapNotNull { s ->
                             if (!s.requireSpace && s.trigger.isNotEmpty()) s.trigger.last() else null
@@ -210,7 +215,7 @@ class SereneInputMethodService : InputMethodService(),
                     KeyboardThemeEngine.resolve(applicationContext, config, isDark)
                 }
 
-                SideEffect {
+                LaunchedEffect(palette.trayBackground, isDark) {
                     window?.window?.let { w ->
                         w.navigationBarColor = palette.trayBackground.toArgb()
                         WindowCompat.getInsetsController(w, w.decorView).isAppearanceLightNavigationBars = !isDark
@@ -237,10 +242,17 @@ class SereneInputMethodService : InputMethodService(),
                 val nextCharPriorsProvider = remember {
                     {
                         val word = session.currentWord
+                        val lang = latestConfig.activeLanguage
                         if (latestConfig.smartTapMode == SmartTapMode.OFF || isPasswordField || word.isEmpty()) {
                             emptyMap()
+                        } else if (word == cachedPriorsWord && lang == cachedPriorsLang) {
+                            cachedPriorsMap
                         } else {
-                            dictionary.getNextCharPriors(word, latestConfig.activeLanguage)
+                            dictionary.getNextCharPriors(word, lang).also {
+                                cachedPriorsWord = word
+                                cachedPriorsLang = lang
+                                cachedPriorsMap = it
+                            }
                         }
                     }
                 }
@@ -358,14 +370,26 @@ class SereneInputMethodService : InputMethodService(),
         val isSeparator = ch == "," || ch == "." || ch == "!" || ch == "?" || ch == ";" || ch == ":"
         if (isSeparator) {
             if (!isPasswordField && config.textExpanderEnabled && ch.isNotEmpty() && ch.last() in instantEndChars) {
-                currentInputConnection?.commitText(ch, 1)
-                checkInstantTextExpansion(config)
-                session.finishWord(null)
-                session.lastCorrection = null
-                if (!isPasswordField && config.autoCap && (ch == "." || ch == "!" || ch == "?") && shiftState == 0 && shouldAutoCap()) {
-                    shiftState = 1
+                val ic = currentInputConnection
+                val before = if (ic != null) runCatching { ic.getTextBeforeCursor(64, 0)?.toString() }.getOrNull() ?: "" else ""
+                val combined = before + ch
+                val matched = config.textSnippets.firstOrNull { s ->
+                    !s.requireSpace && s.trigger.isNotEmpty() && combined.endsWith(s.trigger) &&
+                        (combined.length == s.trigger.length || !combined[combined.length - s.trigger.length - 1].isLetterOrDigit())
                 }
-                return
+                if (matched != null && ic != null) {
+                    val deleteBefore = (matched.trigger.length - ch.length).coerceAtLeast(0)
+                    ic.beginBatchEdit()
+                    if (deleteBefore > 0) ic.deleteSurroundingText(deleteBefore, 0)
+                    ic.commitText(matched.expansion, 1)
+                    ic.endBatchEdit()
+                    session.finishWord(null)
+                    session.lastCorrection = null
+                    if (config.autoCap && (ch == "." || ch == "!" || ch == "?") && shiftState == 0 && shouldAutoCap()) {
+                        shiftState = 1
+                    }
+                    return
+                }
             }
             commitWithAutocorrect(ch, config)
             if (!isPasswordField && config.autoCap && (ch == "." || ch == "!" || ch == "?") && shiftState == 0 && shouldAutoCap()) {
