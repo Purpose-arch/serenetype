@@ -83,17 +83,22 @@ object KeyboardLayouts {
     )
 
     val altChars: Map<String, List<String>> = mapOf(
-        "е" to listOf("ё"),
-        "и" to listOf("й"),
+        "е" to listOf("ё", "є"),
+        "и" to listOf("й", "і", "ї"),
+        "г" to listOf("ґ"),
         "ь" to listOf("ъ"),
-        "a" to listOf("ä", "å", "à", "á", "â"),
-        "o" to listOf("ö", "ø", "ó", "ò", "ô"),
+        "a" to listOf("ä", "å", "à", "á", "â", "æ"),
+        "o" to listOf("ö", "ø", "ó", "ò", "ô", "œ"),
         "u" to listOf("ü", "ú", "ù", "û"),
         "e" to listOf("é", "è", "ê", "ë"),
-        "s" to listOf("ß", "š"),
+        "i" to listOf("í", "ì", "î", "ï"),
+        "n" to listOf("ñ", "ń"),
+        "c" to listOf("ç", "č", "ć"),
+        "s" to listOf("ß", "š", "ś"),
+        "z" to listOf("ž", "ź", "ż"),
         "-" to listOf("—", "–", "•"),
         "\"" to listOf("«", "»", "„", "“"),
-        "$" to listOf("€", "£", "¥", "₽"),
+        "$" to listOf("€", "£", "¥", "₽", "₴"),
         "‘" to listOf("'", "’", "`"),
         "'" to listOf("‘", "’", "`")
     )

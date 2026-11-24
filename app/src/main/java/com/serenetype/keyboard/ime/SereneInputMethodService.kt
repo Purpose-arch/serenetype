@@ -27,6 +27,7 @@ import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import com.serenetype.keyboard.data.DictionaryEngine
 import com.serenetype.keyboard.data.KeyboardConfig
 import com.serenetype.keyboard.data.SettingsRepository
+import com.serenetype.keyboard.data.CandidateBarMode
 import com.serenetype.keyboard.data.SmartTapMode
 import com.serenetype.keyboard.input.ComposingSession
 import com.serenetype.keyboard.input.LastCorrection
@@ -59,12 +60,16 @@ class SereneInputMethodService : InputMethodService(),
     private lateinit var dictionary: DictionaryEngine
     private lateinit var clipboardManager: ClipboardManager
     private val clipHistory = mutableStateListOf<String>()
+    private var lastCapturedClipText: String? = null
+    private var lastCapturedClipTimestamp: Long = -1L
+    private var latestPinnedClips: List<String> = emptyList()
 
     private var lastSpaceTime = 0L
     private var shiftState by mutableIntStateOf(0)
     private var lastShiftTap = 0L
     private var latestConfig = KeyboardConfig()
     private var instantActiveLanguage by mutableStateOf<String?>(null)
+    private var currentCandidates by mutableStateOf<List<String>>(emptyList())
     private var instantEndChars: Set<Char> = emptySet()
 
     private var isPasswordField = false
@@ -83,7 +88,7 @@ class SereneInputMethodService : InputMethodService(),
     private lateinit var touchBiasFile: File
 
     private val clipListener = ClipboardManager.OnPrimaryClipChangedListener {
-        captureClipboard()
+        captureClipboard(fromListener = true)
     }
 
     override val lifecycle: Lifecycle get() = lifecycleRegistry
@@ -145,7 +150,7 @@ class SereneInputMethodService : InputMethodService(),
         }
     }
 
-    private fun captureClipboard() {
+    private fun captureClipboard(fromListener: Boolean = false) {
         val clip = runCatching { clipboardManager.primaryClip }.getOrNull() ?: return
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             val isSensitive = clip.description.extras?.getBoolean(ClipDescription.EXTRA_IS_SENSITIVE, false) == true
@@ -155,12 +160,21 @@ class SereneInputMethodService : InputMethodService(),
             clip.getItemAt(0)?.coerceToText(this)?.toString()
         }.getOrNull()?.trim() ?: return
         if (text.isEmpty()) return
+        val timestamp = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) clip.description.timestamp else -1L
+        if (!fromListener) {
+            if (timestamp > 0L && timestamp == lastCapturedClipTimestamp) return
+            if (timestamp <= 0L && text == lastCapturedClipText) return
+        }
+        lastCapturedClipText = text
+        if (timestamp > 0L) lastCapturedClipTimestamp = timestamp
 
         val updateHistory = {
-            clipHistory.remove(text)
-            clipHistory.add(0, text)
-            if (clipHistory.size > 20) {
-                clipHistory.removeAt(clipHistory.lastIndex)
+            if (text !in latestPinnedClips) {
+                clipHistory.remove(text)
+                clipHistory.add(0, text)
+                if (clipHistory.size > 20) {
+                    clipHistory.removeAt(clipHistory.lastIndex)
+                }
             }
         }
         if (Looper.myLooper() == Looper.getMainLooper()) {
@@ -189,6 +203,7 @@ class SereneInputMethodService : InputMethodService(),
             setContent {
                 val storedConfig by repository.configFlow.collectAsState(initial = latestConfig)
                 val recentEmojis by repository.recentEmojisFlow.collectAsState(initial = KeyboardConfig().recentEmojis)
+                val pinnedClips by repository.pinnedClipsFlow.collectAsState(initial = emptyList())
                 val emojiFontFamily by EmojiFontManager.fontFamilyFlow.collectAsState()
                 val activeLang = instantActiveLanguage?.takeIf { it in storedConfig.enabledLanguages } ?: storedConfig.activeLanguage
                 val config = remember(storedConfig, activeLang) {
@@ -196,6 +211,7 @@ class SereneInputMethodService : InputMethodService(),
                 }
                 SideEffect {
                     latestConfig = config
+                    latestPinnedClips = pinnedClips
                 }
                 LaunchedEffect(config.textExpanderEnabled, config.textSnippets) {
                     instantEndChars = if (config.textExpanderEnabled) {
@@ -217,6 +233,7 @@ class SereneInputMethodService : InputMethodService(),
 
                 LaunchedEffect(palette.trayBackground, isDark) {
                     window?.window?.let { w ->
+                        @Suppress("DEPRECATION")
                         w.navigationBarColor = palette.trayBackground.toArgb()
                         WindowCompat.getInsetsController(w, w.decorView).isAppearanceLightNavigationBars = !isDark
                     }
@@ -295,6 +312,8 @@ class SereneInputMethodService : InputMethodService(),
                     { delta: Int ->
                         performHaptic(latestConfig)
                         session.resetAll()
+                        cachedPriorsWord = ""
+                        currentCandidates = emptyList()
                         val list = latestConfig.enabledLanguages
                         if (list.size > 1) {
                             val current = instantActiveLanguage?.takeIf { it in list } ?: latestConfig.activeLanguage
@@ -309,6 +328,8 @@ class SereneInputMethodService : InputMethodService(),
                     { lang: String ->
                         performHaptic(latestConfig)
                         session.resetAll()
+                        cachedPriorsWord = ""
+                        currentCandidates = emptyList()
                         instantActiveLanguage = lang
                         serviceScope.launch(Dispatchers.IO) { repository.setActiveLanguage(lang) }
                         Unit
@@ -332,12 +353,55 @@ class SereneInputMethodService : InputMethodService(),
                 }
                 val onRemoveClipCb = remember { { text: String -> clipHistory.remove(text); Unit } }
                 val onClearClipsCb = remember { { clipHistory.clear() } }
+                val onTogglePinClipCb = remember {
+                    { text: String ->
+                        performHaptic(latestConfig)
+                        val wasPinned = text in latestPinnedClips
+                        if (!wasPinned) {
+                            clipHistory.remove(text)
+                        } else {
+                            clipHistory.remove(text)
+                            clipHistory.add(0, text)
+                            if (clipHistory.size > 20) {
+                                clipHistory.removeAt(clipHistory.lastIndex)
+                            }
+                        }
+                        serviceScope.launch { repository.togglePinnedClip(text) }
+                        Unit
+                    }
+                }
+                val onRemovePinnedClipCb = remember {
+                    { text: String ->
+                        performHaptic(latestConfig)
+                        clipHistory.remove(text)
+                        if (text in latestPinnedClips) {
+                            serviceScope.launch { repository.togglePinnedClip(text) }
+                        }
+                        Unit
+                    }
+                }
+                val onClearPinnedClipsCb = remember {
+                    {
+                        performHaptic(latestConfig)
+                        val pinnedSnapshot = latestPinnedClips.toSet()
+                        clipHistory.removeAll { it in pinnedSnapshot }
+                        serviceScope.launch { repository.clearPinnedClips() }
+                        Unit
+                    }
+                }
+                val onCandidateClickCb = remember {
+                    { cand: String ->
+                        handleCandidateClick(cand)
+                    }
+                }
 
                 KeyboardUI(
                     config = config,
                     palette = palette,
                     shiftState = shiftState,
                     clipboardHistory = clipHistory,
+                    pinnedClips = pinnedClips,
+                    candidates = currentCandidates,
                     recentEmojis = recentEmojis,
                     emojiFontFamily = emojiFontFamily,
                     nextCharPriorsProvider = nextCharPriorsProvider,
@@ -358,9 +422,60 @@ class SereneInputMethodService : InputMethodService(),
                     onHaptic = onHapticCb,
                     onPasteClip = onPasteClipCb,
                     onRemoveClip = onRemoveClipCb,
-                    onClearClips = onClearClipsCb
+                    onClearClips = onClearClipsCb,
+                    onTogglePinClip = onTogglePinClipCb,
+                    onRemovePinnedClip = onRemovePinnedClipCb,
+                    onClearPinnedClips = onClearPinnedClipsCb,
+                    onCandidateClick = onCandidateClickCb
                 )
             }
+        }
+    }
+
+    private fun refreshCandidates() {
+        val cfg = latestConfig
+        if (isPasswordField || isNoSuggestions || cfg.candidateBarMode == CandidateBarMode.OFF) {
+            if (currentCandidates.isNotEmpty()) currentCandidates = emptyList()
+            return
+        }
+        val word = session.currentWord
+        if (word.length < 2) {
+            if (currentCandidates.isNotEmpty()) currentCandidates = emptyList()
+            return
+        }
+        val touches = if (word.length == session.touchPoints.size) session.touchPoints else emptyList()
+        currentCandidates = dictionary.suggestCandidates(
+            word = word,
+            lang = cfg.activeLanguage,
+            prevWord1 = session.prevWord1,
+            prevWord2 = session.prevWord2,
+            touchPoints = touches,
+            keyCenters = keyCentersMap,
+            avgKeyWidthPx = avgKeyWidthPx,
+            maxResults = 3
+        )
+    }
+
+    private fun handleCandidateClick(cand: String) {
+        val cfg = latestConfig
+        performHaptic(cfg)
+        val ic = currentInputConnection ?: return
+        val cur = session.currentWord
+        ic.beginBatchEdit()
+        if (cur.isNotEmpty()) {
+            val before = runCatching { ic.getTextBeforeCursor(cur.length, 0)?.toString() }.getOrNull()
+            if (before != null && before.equals(cur, ignoreCase = true)) {
+                ic.deleteSurroundingText(cur.length, 0)
+            }
+        }
+        ic.commitText("$cand ", 1)
+        ic.endBatchEdit()
+        dictionary.learnWord(cand, cfg.activeLanguage, prevWord1 = session.prevWord1, prevWord2 = session.prevWord2)
+        session.finishWord(cand, " ")
+        session.lastCorrection = null
+        currentCandidates = emptyList()
+        if (!isPasswordField && cfg.autoCap && shiftState != 2 && shouldAutoCap()) {
+            shiftState = 1
         }
     }
 
@@ -406,6 +521,7 @@ class SereneInputMethodService : InputMethodService(),
         } else {
             session.finishWord(null)
         }
+        refreshCandidates()
 
         if (!isPasswordField && config.textExpanderEnabled && out.isNotEmpty() && out.last() in instantEndChars) {
             checkInstantTextExpansion(config)
@@ -439,6 +555,7 @@ class SereneInputMethodService : InputMethodService(),
 
         revertLastTouchBias()
         session.dropLastChar()
+        refreshCandidates()
 
         val selected = runCatching { ic.getSelectedText(0) }.getOrNull()
         if (!selected.isNullOrEmpty()) {
@@ -462,7 +579,12 @@ class SereneInputMethodService : InputMethodService(),
         if (before.isNullOrEmpty()) return
         var idx = before.length
         while (idx > 0 && before[idx - 1].isWhitespace()) idx--
+        val wordEnd = idx
         while (idx > 0 && !before[idx - 1].isWhitespace()) idx--
+        val deletedWord = before.substring(idx, wordEnd).trim()
+        if (deletedWord.length >= 2) {
+            dictionary.rejectWord(deletedWord, config.activeLanguage)
+        }
         val deleteLen = (before.length - idx).coerceAtLeast(1)
         ic.deleteSurroundingText(deleteLen, 0)
         if (!isPasswordField && config.autoCap && shouldAutoCap() && shiftState == 0) {
@@ -585,6 +707,7 @@ class SereneInputMethodService : InputMethodService(),
                 ic.commitText(suggestion + separator, 1)
                 ic.endBatchEdit()
                 session.finishWord(suggestion, separator)
+                currentCandidates = emptyList()
                 session.lastCorrection = LastCorrection(word, suggestion, separator)
                 return
             }
@@ -595,6 +718,7 @@ class SereneInputMethodService : InputMethodService(),
         }
         session.finishWord(word.ifEmpty { null }, separator)
         session.lastCorrection = null
+        currentCandidates = emptyList()
         ic.commitText(separator, 1)
     }
 
@@ -669,12 +793,15 @@ class SereneInputMethodService : InputMethodService(),
 
         captureClipboard()
         session.resetAll()
+        cachedPriorsWord = ""
+        currentCandidates = emptyList()
         shiftState = if (!isPasswordField && latestConfig.autoCap && shouldAutoCap()) 1 else 0
     }
 
     override fun onFinishInputView(finishingInput: Boolean) {
         super.onFinishInputView(finishingInput)
         session.resetAll()
+        currentCandidates = emptyList()
         dictionary.flushUserDictAsync()
         saveTouchBiasAsync()
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_PAUSE)

@@ -13,14 +13,19 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.File
+import java.net.HttpURLConnection
 import java.net.URL
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.abs
+import kotlin.math.ln
 
 class DictionaryEngine private constructor(private val context: Context) {
 
     companion object {
         private val SUPPORTED_LANGS = listOf("en", "ru", "fi", "de", "uk")
+        private const val MAX_EXT_WORDS = 150_000
+        private const val STAGING_PROMOTE_THRESHOLD = 3
+        private val SPACE_ADJACENT_CHARS = setOf('v', 'b', 'n', 'm', 'c', 'с', 'м', 'и', 'т', 'ь', 'ю')
 
         private val SEEDED_BIGRAMS: Map<String, Map<String, Set<String>>> = mapOf(
             "ru" to mapOf(
@@ -65,6 +70,7 @@ class DictionaryEngine private constructor(private val context: Context) {
 
     private val binaryDicts = ConcurrentHashMap<String, BinaryDict>()
     private val userWordsByLang = ConcurrentHashMap<String, ConcurrentHashMap<String, Int>>()
+    private val stagingWordsByLang = ConcurrentHashMap<String, ConcurrentHashMap<String, Int>>()
     private val wordBigramsByLang = ConcurrentHashMap<String, ConcurrentHashMap<String, ConcurrentHashMap<String, Int>>>()
     private val wordTrigramsByLang = ConcurrentHashMap<String, ConcurrentHashMap<String, ConcurrentHashMap<String, Int>>>()
     private val suppressedWords = ConcurrentHashMap.newKeySet<String>()
@@ -81,6 +87,18 @@ class DictionaryEngine private constructor(private val context: Context) {
     @Volatile
     private var loaded = false
 
+    suspend fun reloadUserData() = withContext(Dispatchers.IO) {
+        loadMutex.withLock {
+            userWordsByLang.clear()
+            stagingWordsByLang.clear()
+            wordBigramsByLang.clear()
+            wordTrigramsByLang.clear()
+            loadUserDict()
+            loadUserBigrams()
+            loadUserTrigrams()
+        }
+    }
+
     suspend fun ensureLoaded() = withContext(Dispatchers.IO) {
         if (loaded) return@withContext
         loadMutex.withLock {
@@ -96,17 +114,17 @@ class DictionaryEngine private constructor(private val context: Context) {
     }
 
     private fun ensureBinaryDict(lang: String, forceRebuild: Boolean) {
-        val sdictFile = File(downloadedDir, "${lang}_v2.sdict")
+        val sdictFile = File(downloadedDir, "${lang}_v3.sdict")
         val extFile = File(downloadedDir, "${lang}_ext.txt")
         val needsBuild = forceRebuild ||
             !sdictFile.exists() ||
             (extFile.exists() && extFile.lastModified() > sdictFile.lastModified())
 
         if (needsBuild) {
-            val map = HashMap<String, Int>(4096)
+            val map = HashMap<String, Int>(8192)
             runCatching {
                 context.assets.open("dict/${lang}_base.txt").bufferedReader().useLines { lines ->
-                    var rank = 6000
+                    var rank = 12000
                     lines.forEach { line ->
                         var start = -1
                         for (i in 0..line.length) {
@@ -117,8 +135,8 @@ class DictionaryEngine private constructor(private val context: Context) {
                                 val w = line.substring(start, i).lowercase()
                                 start = -1
                                 if (w.length >= 2 && !map.containsKey(w)) {
-                                    map[w] = rank.coerceAtLeast(15)
-                                    if (rank > 120) rank -= 2
+                                    map[w] = rank.coerceAtLeast(25)
+                                    if (rank > 200) rank -= 3
                                 }
                             }
                         }
@@ -128,17 +146,28 @@ class DictionaryEngine private constructor(private val context: Context) {
             if (extFile.exists()) {
                 runCatching {
                     extFile.bufferedReader().useLines { lines ->
-                        var freq = 1200
-                        lines.forEach { line ->
+                        var count = 0
+                        var fallbackFreq = 18000
+                        for (line in lines) {
+                            if (count >= MAX_EXT_WORDS) break
                             val trimmed = line.trim()
-                            if (trimmed.isNotEmpty()) {
-                                val sepIdx = trimmed.indexOfFirst { it == '\t' || it == ' ' }
-                                val w = (if (sepIdx > 0) trimmed.substring(0, sepIdx) else trimmed).lowercase()
-                                if (w.length >= 2 && !map.containsKey(w)) {
-                                    map[w] = freq.coerceAtLeast(5)
-                                    if (freq > 5) freq--
-                                }
+                            if (trimmed.isEmpty()) continue
+                            val sepIdx = trimmed.indexOfFirst { it == '\t' || it == ' ' }
+                            val w = (if (sepIdx > 0) trimmed.substring(0, sepIdx) else trimmed).lowercase()
+                            if (w.length < 2 || w.length > 28 || w.any { !it.isLetter() }) continue
+                            val rawFreq = if (sepIdx > 0) {
+                                trimmed.substring(sepIdx + 1).trim().toLongOrNull() ?: 0L
+                            } else 0L
+                            val scaledFreq = if (rawFreq > 0L) {
+                                (ln((rawFreq + 1).toDouble()) * 3200.0).toInt().coerceIn(10, 60000)
+                            } else {
+                                fallbackFreq.coerceAtLeast(10).also { if (fallbackFreq > 10) fallbackFreq-- }
                             }
+                            val prev = map[w]
+                            if (prev == null || scaledFreq > prev) {
+                                map[w] = scaledFreq
+                            }
+                            count++
                         }
                     }
                 }
@@ -161,10 +190,16 @@ class DictionaryEngine private constructor(private val context: Context) {
                 val v = obj.opt(k)
                 if (v is JSONObject) {
                     val langMap = userWordsByLang.getOrPut(k) { ConcurrentHashMap() }
-                    v.keys().forEach { w -> langMap[w] = v.optInt(w, 1) }
+                    v.keys().forEach { w ->
+                        val cnt = v.optInt(w, 1)
+                        if (cnt >= STAGING_PROMOTE_THRESHOLD) langMap[w] = cnt
+                    }
                 } else if (v is Number) {
-                    val lang = if (k.any { it in '\u0400'..'\u04FF' }) "ru" else "en"
-                    userWordsByLang.getOrPut(lang) { ConcurrentHashMap() }[k] = v.toInt()
+                    val cnt = v.toInt()
+                    if (cnt >= STAGING_PROMOTE_THRESHOLD) {
+                        val lang = if (k.any { it in '\u0400'..'\u04FF' }) "ru" else "en"
+                        userWordsByLang.getOrPut(lang) { ConcurrentHashMap() }[k] = cnt
+                    }
                 }
             }
         }
@@ -251,8 +286,26 @@ class DictionaryEngine private constructor(private val context: Context) {
         for (i in 0 until w.length - 2) {
             if (w[i] == w[i + 1] && w[i + 1] == w[i + 2]) return
         }
-        val langMap = userWordsByLang.getOrPut(lang) { ConcurrentHashMap() }
-        langMap[w] = (langMap[w] ?: 0) + 1
+        if (w in suppressedWords) return
+
+        val knownInBase = binaryDicts[lang]?.isKnown(w) == true
+        if (!knownInBase) {
+            val langMap = userWordsByLang.getOrPut(lang) { ConcurrentHashMap() }
+            if (langMap.containsKey(w)) {
+                langMap[w] = (langMap[w] ?: STAGING_PROMOTE_THRESHOLD) + 1
+            } else {
+                // Quarantine staging buffer: promote only after STAGING_PROMOTE_THRESHOLD independent uses
+                val staging = stagingWordsByLang.getOrPut(lang) { ConcurrentHashMap() }
+                val hits = (staging[w] ?: 0) + 1
+                if (hits >= STAGING_PROMOTE_THRESHOLD) {
+                    staging.remove(w)
+                    langMap[w] = STAGING_PROMOTE_THRESHOLD
+                    scheduleSave()
+                } else {
+                    staging[w] = hits
+                }
+            }
+        }
 
         val p1 = prevWord1?.trim()?.lowercase()
         if (!p1.isNullOrEmpty() && p1.length >= 2) {
@@ -273,17 +326,30 @@ class DictionaryEngine private constructor(private val context: Context) {
                     langTrigrams.keys.firstOrNull()?.let { langTrigrams.remove(it) }
                 }
             }
+            scheduleSave()
         }
-        scheduleSave()
     }
 
     fun suppressCorrection(rawWord: String, lang: String = "en") {
         val w = rawWord.trim().lowercase()
         if (w.isEmpty()) return
         suppressedWords.add(w)
-        val langMap = userWordsByLang.getOrPut(lang) { ConcurrentHashMap() }
-        langMap[w] = (langMap[w] ?: 0) + 3
-        scheduleSave()
+        stagingWordsByLang[lang]?.remove(w)
+    }
+
+    fun rejectWord(rawWord: String, lang: String = "en") {
+        val w = rawWord.trim().lowercase()
+        if (w.isEmpty()) return
+        suppressedWords.add(w)
+        stagingWordsByLang[lang]?.remove(w)
+        val userMap = userWordsByLang[lang]
+        if (userMap != null) {
+            val cur = userMap[w]
+            if (cur != null && cur <= 5) {
+                userMap.remove(w)
+                scheduleSave()
+            }
+        }
     }
 
     fun isKnown(word: String, lang: String): Boolean {
@@ -331,6 +397,91 @@ class DictionaryEngine private constructor(private val context: Context) {
         return bonus
     }
 
+    private fun trySplitMissedSpace(lower: String, lang: String): String? {
+        if (lower.length < 5) return null
+        val dict = binaryDicts[lang] ?: return null
+        // 1. Direct split: "goodmorning" -> "good morning"
+        for (i in 2..(lower.length - 2)) {
+            val left = lower.substring(0, i)
+            val right = lower.substring(i)
+            val lf = dict.getWordFrequency(left)
+            val rf = dict.getWordFrequency(right)
+            if (lf >= 120 && rf >= 120) {
+                return "$left $right"
+            }
+        }
+        // 2. Accidental bottom-row char instead of space: "goodbmorning" -> "good morning"
+        if (lower.length >= 6) {
+            for (i in 2..(lower.length - 3)) {
+                if (lower[i] !in SPACE_ADJACENT_CHARS) continue
+                val left = lower.substring(0, i)
+                val right = lower.substring(i + 1)
+                val lf = dict.getWordFrequency(left)
+                val rf = dict.getWordFrequency(right)
+                if (lf >= 250 && rf >= 250) {
+                    return "$left $right"
+                }
+            }
+        }
+        return null
+    }
+
+    fun suggestCandidates(
+        word: String,
+        lang: String,
+        prevWord1: String? = null,
+        prevWord2: String? = null,
+        touchPoints: List<Pair<Float, Float>> = emptyList(),
+        keyCenters: Map<Char, Pair<Float, Float>> = emptyMap(),
+        avgKeyWidthPx: Float = 0f,
+        maxResults: Int = 3
+    ): List<String> {
+        if (!loaded || word.length < 2 || word.length > 18) return emptyList()
+        if (word.any { !it.isLetter() }) return emptyList()
+        val lower = word.lowercase()
+        val p1 = prevWord1?.trim()?.lowercase()?.ifEmpty { null }
+        val p2 = prevWord2?.trim()?.lowercase()?.ifEmpty { null }
+
+        val scored = LinkedHashMap<String, Int>()
+        if (isKnown(lower, lang)) {
+            scored[lower] = 22000 + contextBonus(lower, lang, p1, p2)
+        }
+        val langUserWords = userWordsByLang[lang]
+        if (langUserWords != null) {
+            for ((cand, count) in langUserWords) {
+                if (cand.startsWith(lower) || (word.length >= 3 && abs(cand.length - word.length) <= 1 && isEditDistanceOne(lower, cand))) {
+                    val base = if (cand.startsWith(lower)) 9500 else 5500
+                    val sc = base + (ln((count + 1).toDouble()) * 800.0).toInt() + contextBonus(cand, lang, p1, p2)
+                    val prev = scored[cand]
+                    if (prev == null || sc > prev) scored[cand] = sc
+                }
+            }
+        }
+        val topCands = binaryDicts[lang]?.findTopCandidates(
+            lowerWord = lower,
+            touchPoints = touchPoints,
+            keyCenters = keyCenters,
+            avgKeyWidthPx = avgKeyWidthPx,
+            maxResults = 6,
+            maxEditsOverride = 1,
+            maxVisitsOverride = 1200
+        ).orEmpty()
+        for ((cand, baseScore) in topCands) {
+            val sc = baseScore + contextBonus(cand, lang, p1, p2)
+            val prev = scored[cand]
+            if (prev == null || sc > prev) scored[cand] = sc
+        }
+        if (scored.isEmpty()) {
+            trySplitMissedSpace(lower, lang)?.let { split ->
+                scored[split] = 7000
+            }
+        }
+        return scored.entries
+            .sortedByDescending { it.value }
+            .take(maxResults)
+            .map { preserveCase(word, it.key) }
+    }
+
     fun suggestCorrection(
         word: String,
         lang: String,
@@ -342,9 +493,9 @@ class DictionaryEngine private constructor(private val context: Context) {
     ): String? {
         if (!loaded) return null
         val len = word.length
-        if (len < 3 || len > 18) return null
+        if (len < 2 || len > 18) return null
         if (word.any { !it.isLetter() }) return null
-        if (word.all { it.isUpperCase() }) return null
+        if (word.all { it.isUpperCase() } && len > 1) return null
 
         val lower = word.lowercase()
         if (lower in suppressedWords) return null
@@ -356,13 +507,13 @@ class DictionaryEngine private constructor(private val context: Context) {
         val p1 = prevWord1?.trim()?.lowercase()?.ifEmpty { null }
         val p2 = prevWord2?.trim()?.lowercase()?.ifEmpty { null }
 
-        // 1. Check user personal dictionary
+        // 1. Check verified user dictionary (without overpowering base dictionary)
         val langUserWords = userWordsByLang[lang]
         if (langUserWords != null) {
             for ((cand, count) in langUserWords) {
                 if (abs(cand.length - len) > 1) continue
                 if (isEditDistanceOne(lower, cand)) {
-                    val score = 10000 + count * 50 + contextBonus(cand, lang, p1, p2)
+                    val score = 4500 + (ln((count + 1).toDouble()) * 900.0).toInt() + contextBonus(cand, lang, p1, p2)
                     if (score > bestScore) {
                         bestScore = score
                         bestWord = cand
@@ -385,6 +536,13 @@ class DictionaryEngine private constructor(private val context: Context) {
             if (total > bestScore) {
                 bestScore = total
                 bestWord = cand
+            }
+        }
+
+        // 3. Missed-space split fallback if no confident single-word correction exists
+        if (bestWord == null || bestScore < 1500) {
+            trySplitMissedSpace(lower, lang)?.let { split ->
+                return preserveCase(word, split)
             }
         }
 
@@ -460,22 +618,71 @@ class DictionaryEngine private constructor(private val context: Context) {
     fun hasExtendedDict(lang: String): Boolean = File(downloadedDir, "${lang}_ext.txt").exists()
 
     suspend fun downloadExtendedDictionary(lang: String): Boolean = withContext(Dispatchers.IO) {
-        val url = when (lang) {
-            "en" -> "https://raw.githubusercontent.com/hermitdave/FrequencyWords/master/content/2018/en/en_50k.txt"
-            "ru" -> "https://raw.githubusercontent.com/hermitdave/FrequencyWords/master/content/2018/ru/ru_50k.txt"
-            "fi" -> "https://raw.githubusercontent.com/hermitdave/FrequencyWords/master/content/2018/fi/fi_50k.txt"
-            "de" -> "https://raw.githubusercontent.com/hermitdave/FrequencyWords/master/content/2018/de/de_50k.txt"
-            "uk" -> "https://raw.githubusercontent.com/hermitdave/FrequencyWords/master/content/2018/uk/uk_50k.txt"
+        val urls = when (lang) {
+            "en" -> listOf(
+                "https://raw.githubusercontent.com/hermitdave/FrequencyWords/master/content/2018/en/en_full.txt",
+                "https://raw.githubusercontent.com/hermitdave/FrequencyWords/master/content/2018/en/en_50k.txt"
+            )
+            "ru" -> listOf(
+                "https://raw.githubusercontent.com/hermitdave/FrequencyWords/master/content/2018/ru/ru_full.txt",
+                "https://raw.githubusercontent.com/hermitdave/FrequencyWords/master/content/2018/ru/ru_50k.txt"
+            )
+            "fi" -> listOf(
+                "https://raw.githubusercontent.com/hermitdave/FrequencyWords/master/content/2018/fi/fi_full.txt",
+                "https://raw.githubusercontent.com/hermitdave/FrequencyWords/master/content/2018/fi/fi_50k.txt"
+            )
+            "de" -> listOf(
+                "https://raw.githubusercontent.com/hermitdave/FrequencyWords/master/content/2018/de/de_full.txt",
+                "https://raw.githubusercontent.com/hermitdave/FrequencyWords/master/content/2018/de/de_50k.txt"
+            )
+            "uk" -> listOf(
+                "https://raw.githubusercontent.com/hermitdave/FrequencyWords/master/content/2018/uk/uk_full.txt",
+                "https://raw.githubusercontent.com/hermitdave/FrequencyWords/master/content/2018/uk/uk_50k.txt"
+            )
             else -> return@withContext false
         }
-        return@withContext runCatching {
-            val text = URL(url).readText()
-            if (text.length < 1000) return@runCatching false
-            File(downloadedDir, "${lang}_ext.txt").writeText(text)
-            loadMutex.withLock {
-                ensureBinaryDict(lang, forceRebuild = true)
-            }
-            true
-        }.getOrDefault(false)
+
+        for (url in urls) {
+            val ok = runCatching {
+                val conn = (URL(url).openConnection() as HttpURLConnection).apply {
+                    connectTimeout = 15_000
+                    readTimeout = 45_000
+                    instanceFollowRedirects = true
+                }
+                conn.connect()
+                if (conn.responseCode !in 200..299) {
+                    conn.disconnect()
+                    return@runCatching false
+                }
+                val extFile = File(downloadedDir, "${lang}_ext.txt")
+                val tmpFile = File(downloadedDir, "${lang}_ext.tmp")
+                var linesWritten = 0
+                conn.inputStream.bufferedReader().use { reader ->
+                    tmpFile.bufferedWriter().use { writer ->
+                        while (linesWritten < MAX_EXT_WORDS) {
+                            val line = reader.readLine() ?: break
+                            if (line.isNotBlank()) {
+                                writer.write(line)
+                                writer.newLine()
+                                linesWritten++
+                            }
+                        }
+                    }
+                }
+                conn.disconnect()
+                if (linesWritten < 500) {
+                    tmpFile.delete()
+                    return@runCatching false
+                }
+                if (extFile.exists()) extFile.delete()
+                tmpFile.renameTo(extFile)
+                loadMutex.withLock {
+                    ensureBinaryDict(lang, forceRebuild = true)
+                }
+                true
+            }.getOrDefault(false)
+            if (ok) return@withContext true
+        }
+        false
     }
 }

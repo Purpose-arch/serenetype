@@ -7,15 +7,16 @@ import java.io.RandomAccessFile
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.channels.FileChannel
-import kotlin.math.abs
 import kotlin.math.hypot
+import kotlin.math.ln
 
 /**
- * Compact memory-mapped binary Trie dictionary (.sdict v1):
+ * Compact memory-mapped binary Trie dictionary (.sdict v2):
  * - Zero JVM object allocations per word on load (backed by MappedByteBuffer).
  * - O(word.length * log K) exact lookup.
  * - O(prefix.length * log K) next-character probability priors + embedded char bigrams.
- * - Depth-first Trie Levenshtein automaton with spatial key-distance pruning.
+ * - Bayesian-inspired DFS Damerau-Levenshtein automaton (up to 2 edits for len >= 5)
+ *   with continuous quadratic/Gaussian spatial touch scoring + log-frequency language model.
  */
 class BinaryDict private constructor(
     private val buf: ByteBuffer,
@@ -24,7 +25,7 @@ class BinaryDict private constructor(
 ) {
     companion object {
         private const val MAGIC = 0x53444943 // "SDIC"
-        private const val VERSION = 1
+        private const val VERSION = 2
         private const val HEADER_SIZE = 16
         private const val ROOT_OFFSET = HEADER_SIZE
 
@@ -76,7 +77,6 @@ class BinaryDict private constructor(
                 fun assign(n: BuildNode, currentOff: Int): Int {
                     n.offset = currentOff
                     ordered.add(n)
-                    // Node layout: wordFreq(2) + subtreeSum(4) + childCount(2) + childCount * (char(2) + childOffset(4))
                     var nextOff = currentOff + 8 + n.children.size * 6
                     for (c in n.children) {
                         nextOff = assign(c.node, nextOff)
@@ -86,7 +86,7 @@ class BinaryDict private constructor(
                 val bigramOff = assign(root, HEADER_SIZE)
 
                 val tmpFile = File(outFile.parentFile, "${outFile.name}.tmp")
-                DataOutputStream(BufferedOutputStream(tmpFile.outputStream(), 32768)).use { out ->
+                DataOutputStream(BufferedOutputStream(tmpFile.outputStream(), 65536)).use { out ->
                     out.writeInt(MAGIC)
                     out.writeShort(VERSION)
                     out.writeInt(ordered.size)
@@ -103,7 +103,6 @@ class BinaryDict private constructor(
                         }
                     }
 
-                    // Write top character bigrams grouped by prevChar
                     val byPrev = HashMap<Char, MutableList<Pair<Char, Long>>>()
                     charBigrams.forEach { (k, v) ->
                         val p = (k ushr 16).toChar()
@@ -207,13 +206,22 @@ class BinaryDict private constructor(
         return freq > 0
     }
 
+    fun getWordFrequency(lowerWord: String): Int {
+        if (lowerWord.length < 2) return 0
+        var off = ROOT_OFFSET
+        for (i in lowerWord.indices) {
+            off = findChildOffset(off, lowerWord[i])
+            if (off < 0) return 0
+        }
+        return buf.getShort(off).toInt() and 0xFFFF
+    }
+
     fun getNextCharPriors(lowerPrefix: String): Map<Char, Float> {
         if (lowerPrefix.isEmpty()) return emptyMap()
         var off = ROOT_OFFSET
         for (i in lowerPrefix.indices) {
             off = findChildOffset(off, lowerPrefix[i])
             if (off < 0) {
-                // Fallback to character bigram of the last character
                 val last = lowerPrefix.last()
                 return charBigrams[last] ?: emptyMap()
             }
@@ -246,10 +254,6 @@ class BinaryDict private constructor(
         return charBigrams[prevChar]?.get(nextChar) ?: 0f
     }
 
-    /**
-     * Trie Levenshtein search with spatial proximity scoring using actual touch points
-     * (or key centers as fallback). Runs in < 0.5 ms even on 50k+ words with zero word-list scans.
-     */
     fun findBestCorrection(
         lowerWord: String,
         touchPoints: List<Pair<Float, Float>>,
@@ -259,51 +263,65 @@ class BinaryDict private constructor(
         return findTopCandidates(lowerWord, touchPoints, keyCenters, avgKeyWidthPx, maxResults = 1).firstOrNull()
     }
 
+    /**
+     * Bayesian-inspired spatial + Damerau-Levenshtein search:
+     * - Supports up to 2 edits for words >= 5 chars (1 edit for shorter words).
+     * - Continuous Gaussian/quadratic spatial score using actual (x, y) touch trajectory.
+     * - Log-frequency language prior so high-frequency inflections & case forms rank accurately.
+     */
     fun findTopCandidates(
         lowerWord: String,
         touchPoints: List<Pair<Float, Float>>,
         keyCenters: Map<Char, Pair<Float, Float>>,
         avgKeyWidthPx: Float,
-        maxResults: Int = 6
+        maxResults: Int = 6,
+        maxEditsOverride: Int? = null,
+        maxVisitsOverride: Int? = null
     ): List<Pair<String, Int>> {
         val len = lowerWord.length
-        if (len < 3 || len > 18) return emptyList()
+        if (len < 2 || len > 18) return emptyList()
 
-        val candidates = HashMap<String, Int>(12)
-        val maxSearchDist = if (avgKeyWidthPx > 1f) avgKeyWidthPx * 2.45f else Float.MAX_VALUE
-        val adjDist = if (avgKeyWidthPx > 1f) avgKeyWidthPx * 1.40f else Float.MAX_VALUE
-        val pathBuf = CharArray(len + 2)
+        val maxEdits = maxEditsOverride ?: if (len >= 5) 2 else 1
+        val candidates = HashMap<String, Int>(16)
+        val hasGeom = avgKeyWidthPx > 1f && keyCenters.isNotEmpty()
+        val pathBuf = CharArray(len + 3)
         var dfsVisits = 0
-        val maxDfsVisits = 2500
+        val maxDfsVisits = maxVisitsOverride ?: 3500
 
-        fun spatialBonusForChar(idx: Int, candCh: Char, typedCh: Char): Int {
-            if (avgKeyWidthPx <= 1f) return 0
-            val candCenter = keyCenters[candCh] ?: return 0
+        fun continuousSpatialScore(idx: Int, candCh: Char, typedCh: Char): Int {
+            if (!hasGeom) return 0
+            val candCenter = keyCenters[candCh] ?: return -1500
             val touch = if (idx < touchPoints.size) touchPoints[idx] else keyCenters[typedCh]
-            if (touch == null) return 0
-            val d = hypot(touch.first - candCenter.first, touch.second - candCenter.second)
-            return when {
-                d <= adjDist -> 3600
-                d <= maxSearchDist -> 1100
-                else -> -2200
-            }
+            if (touch == null) return -1500
+            val normDist = hypot(touch.first - candCenter.first, touch.second - candCenter.second) / avgKeyWidthPx
+            if (normDist > 1.85f) return Int.MIN_VALUE // hard spatial prune
+            return (3200f - normDist * normDist * 1650f).toInt()
         }
 
-        fun dfs(nodeOff: Int, wordIdx: Int, depth: Int, editsLeft: Int, bonusScore: Int) {
+        fun neighborProximityBonus(chA: Char, chB: Char, hitBonus: Int): Int {
+            if (!hasGeom) return 0
+            val pA = keyCenters[chA] ?: return 0
+            val pB = keyCenters[chB] ?: return 0
+            val normDist = hypot(pA.first - pB.first, pA.second - pB.second) / avgKeyWidthPx
+            return if (normDist <= 1.45f) hitBonus else -600
+        }
+
+        fun dfs(nodeOff: Int, wordIdx: Int, depth: Int, editsLeft: Int, editsUsed: Int, scoreAcc: Int) {
             if (depth >= pathBuf.size || dfsVisits >= maxDfsVisits) return
             dfsVisits++
 
             if (wordIdx == len) {
                 val freq = buf.getShort(nodeOff).toInt() and 0xFFFF
                 if (freq > 0) {
-                    val total = freq + bonusScore
+                    val langScore = (ln((freq + 1).toDouble()) * 420.0).toInt()
+                    val editPenalty = editsUsed * 1950
+                    val total = langScore + scoreAcc - editPenalty
                     val candStr = String(pathBuf, 0, depth)
                     val prev = candidates[candStr]
                     if (prev == null || total > prev) {
                         candidates[candStr] = total
                     }
                 }
-                // Allow 1 trailing insertion (missed last letter)
                 if (editsLeft > 0) {
                     val childCount = buf.getShort(nodeOff + 6).toInt() and 0xFFFF
                     val base = nodeOff + 8
@@ -312,7 +330,7 @@ class BinaryDict private constructor(
                         val ch = buf.getChar(entryOff)
                         val childOff = buf.getInt(entryOff + 2)
                         pathBuf[depth] = ch
-                        dfs(childOff, wordIdx, depth + 1, editsLeft - 1, bonusScore + 800)
+                        dfs(childOff, wordIdx, depth + 1, editsLeft - 1, editsUsed + 1, scoreAcc + 650)
                     }
                 }
                 return
@@ -326,7 +344,7 @@ class BinaryDict private constructor(
             val exactChildOff = findChildOffset(nodeOff, targetCh)
             if (exactChildOff >= 0) {
                 pathBuf[depth] = targetCh
-                dfs(exactChildOff, wordIdx + 1, depth + 1, editsLeft, bonusScore)
+                dfs(exactChildOff, wordIdx + 1, depth + 1, editsLeft, editsUsed, scoreAcc + 900)
             }
 
             if (editsLeft <= 0) return
@@ -340,18 +358,14 @@ class BinaryDict private constructor(
                     if (c2 >= 0) {
                         pathBuf[depth] = nextCh
                         pathBuf[depth + 1] = targetCh
-                        dfs(c2, wordIdx + 2, depth + 2, editsLeft - 1, bonusScore + 2800)
+                        dfs(c2, wordIdx + 2, depth + 2, editsLeft - 1, editsUsed + 1, scoreAcc + 2500)
                     }
                 }
             }
 
-            // 3. Deletion (skip targetCh at wordIdx — accidental extra tap)
-            val delNeighborBonus = if (wordIdx > 0 && avgKeyWidthPx > 1f) {
-                val p1 = keyCenters[targetCh]
-                val p0 = keyCenters[lowerWord[wordIdx - 1]]
-                if (p1 != null && p0 != null && hypot(p1.first - p0.first, p1.second - p0.second) <= adjDist) 2100 else 0
-            } else 0
-            dfs(nodeOff, wordIdx + 1, depth, editsLeft - 1, bonusScore + delNeighborBonus)
+            // 3. Deletion (skip accidental extra tap at wordIdx)
+            val delBonus = if (wordIdx > 0) neighborProximityBonus(targetCh, lowerWord[wordIdx - 1], 1800) else 0
+            dfs(nodeOff, wordIdx + 1, depth, editsLeft - 1, editsUsed + 1, scoreAcc + delBonus)
 
             // 4. Substitution & Insertion across children
             for (i in 0 until childCount) {
@@ -360,25 +374,25 @@ class BinaryDict private constructor(
                 if (ch == targetCh) continue
                 val childOff = buf.getInt(entryOff + 2)
 
-                // Substitution
-                val subBonus = spatialBonusForChar(wordIdx, ch, targetCh)
-                if (subBonus > -2000) {
+                // Substitution with continuous spatial score
+                val subSpatial = continuousSpatialScore(wordIdx, ch, targetCh)
+                if (subSpatial != Int.MIN_VALUE) {
                     pathBuf[depth] = ch
-                    dfs(childOff, wordIdx + 1, depth + 1, editsLeft - 1, bonusScore + subBonus)
+                    dfs(childOff, wordIdx + 1, depth + 1, editsLeft - 1, editsUsed + 1, scoreAcc + subSpatial)
                 }
 
                 // Insertion (missed letter before targetCh)
-                val insBonus = if (avgKeyWidthPx > 1f) {
-                    val pCh = keyCenters[ch]
-                    val pTarget = keyCenters[targetCh]
-                    if (pCh != null && pTarget != null && hypot(pCh.first - pTarget.first, pCh.second - pTarget.second) <= adjDist) 1500 else 0
-                } else 0
-                pathBuf[depth] = ch
-                dfs(childOff, wordIdx, depth + 1, editsLeft - 1, bonusScore + insBonus)
+                if (editsUsed == 0 || len >= 6) {
+                    val insBonus = neighborProximityBonus(ch, targetCh, 1400)
+                    if (insBonus >= 0) {
+                        pathBuf[depth] = ch
+                        dfs(childOff, wordIdx, depth + 1, editsLeft - 1, editsUsed + 1, scoreAcc + insBonus)
+                    }
+                }
             }
         }
 
-        dfs(ROOT_OFFSET, 0, 0, 1, 0)
+        dfs(ROOT_OFFSET, 0, 0, maxEdits, 0, 0)
         if (candidates.isEmpty()) return emptyList()
         return candidates.entries
             .sortedByDescending { it.value }

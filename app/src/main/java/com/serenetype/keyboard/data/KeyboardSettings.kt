@@ -27,6 +27,13 @@ enum class SmartTapMode(val label: String, val alphaWeight: Float) {
     STRONG("strong", 2.35f)
 }
 
+enum class CandidateBarMode(val label: String) {
+    OFF("off"),
+    SEPARATE("separate"),
+    INLINE("inline"),
+    DYNAMIC("dynamic")
+}
+
 enum class KeyFontStyle(val label: String) {
     SYSTEM_SANS("system"),
     ROUNDED("rounded"),
@@ -112,6 +119,7 @@ data class KeyboardConfig(
     val doubleSpacePeriod: Boolean = false,
     val autocorrectEnabled: Boolean = true,
     val smartTapMode: SmartTapMode = SmartTapMode.BALANCED,
+    val candidateBarMode: CandidateBarMode = CandidateBarMode.OFF,
 
     val recentEmojis: List<String> = listOf("😂", "❤️", "🔥", "👍", "😭", "🙏", "✨", "🥰"),
 
@@ -175,6 +183,8 @@ class SettingsRepository(private val context: Context) {
         val DOUBLE_SPACE_DOT = booleanPreferencesKey("double_space_dot")
         val AUTOCORRECT = booleanPreferencesKey("autocorrect")
         val SMART_TAP_MODE = stringPreferencesKey("smart_tap_mode")
+        val CANDIDATE_BAR_MODE = stringPreferencesKey("candidate_bar_mode")
+        val PINNED_CLIPS_JSON = stringPreferencesKey("pinned_clips_json")
 
         val RECENT_EMOJIS = stringPreferencesKey("recent_emojis")
 
@@ -236,7 +246,7 @@ class SettingsRepository(private val context: Context) {
                 ?: default.topBarButtons
 
             val validBottomIds = setOf("123", "COMMA", "SPACE", "PERIOD", "ENTER", "GLOBE", "EMOJI")
-            val requiredBottom = setOf("123", "COMMA", "SPACE", "PERIOD", "ENTER")
+            val requiredBottom = setOf("123", "SPACE", "ENTER")
             val bottomOrder = prefs[Keys.BOTTOM_ORDER]
                 ?.split(",")
                 ?.map { it.trim() }
@@ -286,6 +296,9 @@ class SettingsRepository(private val context: Context) {
                 smartTapMode = runCatching {
                     SmartTapMode.valueOf(prefs[Keys.SMART_TAP_MODE] ?: default.smartTapMode.name)
                 }.getOrDefault(default.smartTapMode),
+                candidateBarMode = runCatching {
+                    CandidateBarMode.valueOf(prefs[Keys.CANDIDATE_BAR_MODE] ?: default.candidateBarMode.name)
+                }.getOrDefault(default.candidateBarMode),
                 recentEmojis = default.recentEmojis,
                 instantKeyCommit = prefs[Keys.INSTANT_KEY_COMMIT] ?: default.instantKeyCommit,
                 hapticEnabled = prefs[Keys.HAPTIC_ENABLED] ?: default.hapticEnabled,
@@ -345,6 +358,26 @@ class SettingsRepository(private val context: Context) {
 
     suspend fun setBottomRowOrder(order: List<String>) = context.keyboardDataStore.edit {
         it[Keys.BOTTOM_ORDER] = order.joinToString(",")
+    }
+
+    suspend fun toggleBottomKey(id: String) = context.keyboardDataStore.edit { prefs ->
+        val valid = setOf("123", "COMMA", "SPACE", "PERIOD", "ENTER", "GLOBE", "EMOJI")
+        if (id !in valid || id in setOf("123", "SPACE", "ENTER")) return@edit
+        val current = (prefs[Keys.BOTTOM_ORDER] ?: KeyboardConfig().bottomRowOrder.joinToString(","))
+            .split(",").map { it.trim() }.filter { it in valid }.distinct().toMutableList()
+        if (id in current) {
+            current.remove(id)
+        } else {
+            val spaceIdx = current.indexOf("SPACE").coerceAtLeast(0)
+            val enterIdx = current.indexOf("ENTER").let { if (it >= 0) it else current.size }
+            when (id) {
+                "PERIOD" -> current.add(enterIdx, id)
+                else -> current.add((spaceIdx + 1).coerceAtMost(current.size), id)
+            }
+        }
+        prefs[Keys.BOTTOM_ORDER] = current.joinToString(",")
+        prefs[Keys.SHOW_GLOBE] = "GLOBE" in current
+        prefs[Keys.SHOW_EMOJI] = "EMOJI" in current
     }
 
     suspend fun setTopBarButtons(buttons: List<String>) = context.keyboardDataStore.edit {
@@ -409,6 +442,38 @@ class SettingsRepository(private val context: Context) {
 
     suspend fun setSmartTapMode(mode: SmartTapMode) = context.keyboardDataStore.edit {
         it[Keys.SMART_TAP_MODE] = mode.name
+    }
+
+    suspend fun setCandidateBarMode(mode: CandidateBarMode) = context.keyboardDataStore.edit {
+        it[Keys.CANDIDATE_BAR_MODE] = mode.name
+    }
+
+    val pinnedClipsFlow: Flow<List<String>> = context.keyboardDataStore.data
+        .map { prefs ->
+            val raw = prefs[Keys.PINNED_CLIPS_JSON] ?: return@map emptyList()
+            runCatching {
+                val arr = JSONArray(raw)
+                List(arr.length()) { i -> arr.getString(i) }.filter { it.isNotEmpty() }
+            }.getOrDefault(emptyList())
+        }
+        .distinctUntilChanged()
+
+    suspend fun togglePinnedClip(text: String) = context.keyboardDataStore.edit { prefs ->
+        val list = prefs[Keys.PINNED_CLIPS_JSON]?.let { raw ->
+            runCatching {
+                val arr = JSONArray(raw)
+                MutableList(arr.length()) { i -> arr.getString(i) }
+            }.getOrNull()
+        } ?: mutableListOf()
+        if (text in list) list.remove(text) else list.add(0, text)
+        if (list.size > 30) list.removeAt(list.lastIndex)
+        val out = JSONArray()
+        list.forEach { out.put(it) }
+        prefs[Keys.PINNED_CLIPS_JSON] = out.toString()
+    }
+
+    suspend fun clearPinnedClips() = context.keyboardDataStore.edit { prefs ->
+        prefs.remove(Keys.PINNED_CLIPS_JSON)
     }
 
     suspend fun setHapticStrength(strength: Int) = context.keyboardDataStore.edit {

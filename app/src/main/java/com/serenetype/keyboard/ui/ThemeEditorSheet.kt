@@ -6,7 +6,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -65,7 +64,7 @@ fun ThemeEditorDialog(
                 onValueChange = { name = it },
                 label = { Text("name") },
                 singleLine = true,
-                shape = RoundedCornerShape(14.dp),
+                shape = SereneTokens.InnerShape,
                 modifier = Modifier.fillMaxWidth()
             )
 
@@ -93,7 +92,7 @@ fun ThemeEditorDialog(
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(50.dp),
-                shape = RoundedCornerShape(16.dp)
+                shape = SereneTokens.InnerShape
             ) {
                 Text("save")
             }
@@ -130,7 +129,7 @@ private fun ColorFieldRow(
                     onValueChange = onChange,
                     isError = !isValid,
                     singleLine = true,
-                    shape = RoundedCornerShape(12.dp),
+                    shape = SereneTokens.SmallShape,
                     modifier = Modifier.width(120.dp),
                     textStyle = MaterialTheme.typography.bodySmall
                 )

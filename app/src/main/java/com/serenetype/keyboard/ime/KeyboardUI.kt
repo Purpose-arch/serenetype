@@ -18,6 +18,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.layout.*
@@ -28,6 +30,7 @@ import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.Undo
@@ -44,6 +47,7 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathMeasure
@@ -74,21 +78,19 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.zIndex
+import com.serenetype.keyboard.data.CandidateBarMode
 import com.serenetype.keyboard.data.KeyFontStyle
 import com.serenetype.keyboard.data.KeyboardConfig
-import com.serenetype.keyboard.data.SmartTapMode
 import com.serenetype.keyboard.input.ActivePointer
 import com.serenetype.keyboard.input.KeyDetector
 import com.serenetype.keyboard.input.PointerTrackerQueue
 import com.serenetype.keyboard.input.TypingTimeRecorder
 import com.serenetype.keyboard.data.KeyboardLayouts
 import com.serenetype.keyboard.theme.KeyboardPalette
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.abs
 import kotlin.math.hypot
-import kotlin.math.ln
 import kotlin.math.roundToInt
 
 private val WHITESPACE_REGEX = Regex("\\s+")
@@ -125,6 +127,8 @@ fun KeyboardUI(
     palette: KeyboardPalette,
     shiftState: Int,
     clipboardHistory: List<String>,
+    pinnedClips: List<String> = emptyList(),
+    candidates: List<String> = emptyList(),
     recentEmojis: List<String>,
     emojiFontFamily: FontFamily,
     nextCharPriorsProvider: () -> Map<Char, Float> = { emptyMap() },
@@ -145,7 +149,11 @@ fun KeyboardUI(
     onHaptic: () -> Unit = {},
     onPasteClip: (String) -> Unit,
     onRemoveClip: (String) -> Unit,
-    onClearClips: () -> Unit = {}
+    onClearClips: () -> Unit = {},
+    onTogglePinClip: (String) -> Unit = {},
+    onRemovePinnedClip: (String) -> Unit = {},
+    onClearPinnedClips: () -> Unit = {},
+    onCandidateClick: (String) -> Unit = {}
 ) {
     var layer by remember { mutableStateOf(KeyboardLayer.LETTERS) }
     var showLangMenu by remember { mutableStateOf(false) }
@@ -186,19 +194,76 @@ fun KeyboardUI(
                     bottom = config.bottomPaddingDp.dp
                 )
         ) {
-            if (config.showTopBar && config.topBarButtons.isNotEmpty()) {
-                TopUtilityBar(
-                    buttons = config.topBarButtons,
-                    activeLayer = layer,
-                    config = config,
-                    palette = palette,
-                    onButtonClick = { id ->
-                        when (id) {
-                            "EMOJI" -> { onHaptic(); layer = if (layer == KeyboardLayer.EMOJI) KeyboardLayer.LETTERS else KeyboardLayer.EMOJI }
-                            "CLIPBOARD" -> { onHaptic(); layer = if (layer == KeyboardLayer.CLIPBOARD) KeyboardLayer.LETTERS else KeyboardLayer.CLIPBOARD }
-                            else -> onTopAction(id)
+            val showCandsInLetters = layer == KeyboardLayer.LETTERS && candidates.isNotEmpty()
+            val showTopUtility = config.showTopBar && config.topBarButtons.isNotEmpty()
+
+            if (showTopUtility) {
+                if (config.candidateBarMode == CandidateBarMode.DYNAMIC && showCandsInLetters) {
+                    CandidateStrip(
+                        candidates = candidates,
+                        palette = palette,
+                        fontFamily = fontFamily,
+                        onCandidateClick = onCandidateClick
+                    )
+                } else if (config.candidateBarMode == CandidateBarMode.INLINE && showCandsInLetters) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().height(34.dp),
+                        horizontalArrangement = Arrangement.spacedBy(config.horizontalGapDp.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            config.topBarButtons.take(3).forEach { id ->
+                                CompactTopBarButton(
+                                    id = id,
+                                    selected = (id == "EMOJI" && layer == KeyboardLayer.EMOJI) ||
+                                        (id == "CLIPBOARD" && layer == KeyboardLayer.CLIPBOARD),
+                                    config = config,
+                                    palette = palette,
+                                    onClick = {
+                                        when (id) {
+                                            "EMOJI" -> { onHaptic(); layer = if (layer == KeyboardLayer.EMOJI) KeyboardLayer.LETTERS else KeyboardLayer.EMOJI }
+                                            "CLIPBOARD" -> { onHaptic(); layer = if (layer == KeyboardLayer.CLIPBOARD) KeyboardLayer.LETTERS else KeyboardLayer.CLIPBOARD }
+                                            else -> onTopAction(id)
+                                        }
+                                    }
+                                )
+                            }
                         }
+                        CandidateStrip(
+                            candidates = candidates,
+                            palette = palette,
+                            fontFamily = fontFamily,
+                            onCandidateClick = onCandidateClick,
+                            modifier = Modifier.weight(1f)
+                        )
                     }
+                } else {
+                    TopUtilityBar(
+                        buttons = config.topBarButtons,
+                        activeLayer = layer,
+                        config = config,
+                        palette = palette,
+                        onButtonClick = { id ->
+                            when (id) {
+                                "EMOJI" -> { onHaptic(); layer = if (layer == KeyboardLayer.EMOJI) KeyboardLayer.LETTERS else KeyboardLayer.EMOJI }
+                                "CLIPBOARD" -> { onHaptic(); layer = if (layer == KeyboardLayer.CLIPBOARD) KeyboardLayer.LETTERS else KeyboardLayer.CLIPBOARD }
+                                else -> onTopAction(id)
+                            }
+                        }
+                    )
+                }
+                Spacer(modifier = Modifier.height(6.dp))
+            }
+
+            if (config.candidateBarMode == CandidateBarMode.SEPARATE && showCandsInLetters) {
+                CandidateStrip(
+                    candidates = candidates,
+                    palette = palette,
+                    fontFamily = fontFamily,
+                    onCandidateClick = onCandidateClick
                 )
                 Spacer(modifier = Modifier.height(6.dp))
             }
@@ -222,12 +287,16 @@ fun KeyboardUI(
                         config = config,
                         palette = palette,
                         clips = clipboardHistory,
+                        pinnedClips = pinnedClips,
                         onPaste = {
                             onPasteClip(it)
                             layer = KeyboardLayer.LETTERS
                         },
                         onRemove = onRemoveClip,
+                        onTogglePin = onTogglePinClip,
+                        onRemovePinned = onRemovePinnedClip,
                         onClearAll = { onHaptic(); onClearClips() },
+                        onClearPinned = { onHaptic(); onClearPinnedClips() },
                         onBackToLetters = { onHaptic(); layer = KeyboardLayer.LETTERS }
                     )
                 }
@@ -300,6 +369,15 @@ fun KeyboardUI(
                     val latestOnTouchSample by rememberUpdatedState(onTouchSample)
                     val latestOnGeometryUpdate by rememberUpdatedState(onKeyGeometryUpdate)
                     val latestOnCharWithPos by rememberUpdatedState(onCharWithPos)
+
+                    LaunchedEffect(keyDetector.boundsVersion) {
+                        if (useUnifiedGrid && keyDetector.boundsVersion > 0) {
+                            val (centers, avgW) = keyDetector.snapshotGeometry()
+                            if (centers.size >= 20) {
+                                latestOnGeometryUpdate(centers, avgW)
+                            }
+                        }
+                    }
 
                     val cornerPx = with(density) { config.cornerRadiusDp.dp.toPx() }
                     val shadowOffsetPx = with(density) { 1.dp.toPx() }
@@ -636,34 +714,38 @@ fun KeyboardUI(
                                             } else key
                                             val alts = KeyboardLayouts.altChars[key.lowercase()].orEmpty()
 
-                                            CharKeyCap(
-                                                modifier = Modifier.width(unitKeyWidth),
-                                                label = label,
-                                                alts = alts,
-                                                uppercaseAlts = currentLayer == KeyboardLayer.LETTERS && shiftState > 0,
-                                                height = config.keyHeightDp.dp,
-                                                radius = config.cornerRadiusDp.dp,
-                                                fontSizeSp = uniformFontSp,
-                                                fontFamily = fontFamily,
-                                                config = config,
-                                                palette = palette,
-                                                previewController = previewController,
-                                                externalTouchEnabled = useUnifiedGrid,
-                                                externalPressed = (pressedKeyCounts[key] ?: 0) > 0,
-                                                externalShowAlts = gridAltsKey == key,
-                                                externalAltsSelectedIdx = if (gridAltsKey == key) gridAltsSelectedIdx else -1,
-                                                onDismissExternalAlts = { gridAltsKey = null },
-                                                onBoundsChanged = { rect ->
-                                                    if (currentLayer == KeyboardLayer.LETTERS) {
-                                                        keyDetector.updateKeyBounds(key, rect)
-                                                        val (centers, avgW) = keyDetector.snapshotGeometry()
-                                                        if (centers.size >= 20) {
-                                                            latestOnGeometryUpdate(centers, avgW)
-                                                        }
-                                                    }
-                                                },
-                                                onCommit = onChar
-                                            )
+                                            if (useUnifiedGrid) {
+                                                GridLetterKeyCap(
+                                                    modifier = Modifier.width(unitKeyWidth),
+                                                    label = label,
+                                                    alts = alts,
+                                                    uppercaseAlts = shiftState > 0,
+                                                    height = config.keyHeightDp.dp,
+                                                    fontSizeSp = uniformFontSp,
+                                                    fontFamily = fontFamily,
+                                                    palette = palette,
+                                                    showAlts = gridAltsKey == key,
+                                                    altsSelectedIdx = if (gridAltsKey == key) gridAltsSelectedIdx else -1,
+                                                    onDismissAlts = { gridAltsKey = null },
+                                                    onBoundsChanged = { rect -> keyDetector.updateKeyBounds(key, rect) },
+                                                    onCommitAlt = onChar
+                                                )
+                                            } else {
+                                                CharKeyCap(
+                                                    modifier = Modifier.width(unitKeyWidth),
+                                                    label = label,
+                                                    alts = alts,
+                                                    uppercaseAlts = false,
+                                                    height = config.keyHeightDp.dp,
+                                                    radius = config.cornerRadiusDp.dp,
+                                                    fontSizeSp = uniformFontSp,
+                                                    fontFamily = fontFamily,
+                                                    config = config,
+                                                    palette = palette,
+                                                    previewController = previewController,
+                                                    onCommit = onChar
+                                                )
+                                            }
                                         }
                                     }
                                 }
@@ -738,8 +820,8 @@ fun KeyboardUI(
                                         )
                                     }
 
-                                    "GLOBE" -> if (config.showGlobeKey) {
-                                        Box(modifier = Modifier.weight(1.1f)) {
+                                    "GLOBE" -> {
+                                        Box(modifier = Modifier.weight(config.punctWeight.coerceAtLeast(0.95f))) {
                                             FuncKeyCap(
                                                 modifier = Modifier.fillMaxWidth(),
                                                 height = config.keyHeightDp.dp,
@@ -804,14 +886,14 @@ fun KeyboardUI(
                                         }
                                     }
 
-                                    "EMOJI" -> if (config.showEmojiKey) {
+                                    "EMOJI" -> {
                                         FuncKeyCap(
-                                            modifier = Modifier.weight(1.1f),
+                                            modifier = Modifier.weight(config.punctWeight.coerceAtLeast(0.95f)),
                                             height = config.keyHeightDp.dp,
                                             radius = config.funcCornerRadiusDp.dp,
                                             config = config,
                                             palette = palette,
-                                            onClick = { onHaptic(); layer = KeyboardLayer.EMOJI }
+                                            onClick = { onHaptic(); layer = if (layer == KeyboardLayer.EMOJI) KeyboardLayer.LETTERS else KeyboardLayer.EMOJI }
                                         ) {
                                             Icon(
                                                 imageVector = KeyboardIcons.Emoji,
@@ -917,10 +999,16 @@ fun KeyboardUI(
                                         .background(if (isSel) palette.accent else palette.funcKeyBackground),
                                     contentAlignment = Alignment.Center
                                 ) {
+                                    val qSym = quickSymbols[idx]
+                                    val qFontSp = when {
+                                        qSym.length <= 1 -> 20f
+                                        qSym.length == 2 -> 15f
+                                        else -> 12f
+                                    }
                                     Text(
-                                        text = quickSymbols[idx],
+                                        text = qSym,
                                         color = if (isSel) palette.accentText else palette.popupText,
-                                        fontSize = 20.sp,
+                                        fontSize = qFontSp.sp,
                                         fontWeight = if (isSel) FontWeight.SemiBold else FontWeight.Normal,
                                         fontFamily = fontFamily,
                                         maxLines = 1
@@ -1208,18 +1296,32 @@ private fun AnimatedCheckCircle(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ClipboardPanel(
     config: KeyboardConfig,
     palette: KeyboardPalette,
     clips: List<String>,
+    pinnedClips: List<String>,
     onPaste: (String) -> Unit,
     onRemove: (String) -> Unit,
+    onTogglePin: (String) -> Unit,
+    onRemovePinned: (String) -> Unit,
     onClearAll: () -> Unit,
+    onClearPinned: () -> Unit,
     onBackToLetters: () -> Unit
 ) {
+    val scope = rememberCoroutineScope()
+    val density = LocalDensity.current
+    val pagerState = rememberPagerState(initialPage = 0, pageCount = { 2 })
+    val recentClips = remember(clips, pinnedClips) {
+        val pinnedSet = pinnedClips.toHashSet()
+        clips.filter { it !in pinnedSet }
+    }
     val rowCount = if (config.showNumberRow) 5 else 4
     val totalHeight = (config.keyHeightDp * rowCount + config.verticalGapDp * (rowCount - 1)).dp
+    val pinnedLabel = "pinned"
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -1229,32 +1331,44 @@ private fun ClipboardPanel(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 4.dp, vertical = 2.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
+                .padding(horizontal = 2.dp, vertical = 2.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text(
-                text = "clipboard",
-                color = palette.secondaryText,
-                fontSize = 12.sp,
-                fontWeight = FontWeight.Medium
+            ClipboardFrostedTabPill(
+                labels = listOf("recent", pinnedLabel),
+                selectedIndex = pagerState.targetPage,
+                palette = palette,
+                onSelect = { idx ->
+                    scope.launch { pagerState.animateScrollToPage(idx) }
+                },
+                modifier = Modifier.weight(1f)
             )
+
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-                if (clips.isNotEmpty()) {
-                    FuncKeyCap(
-                        modifier = Modifier.width(56.dp),
-                        height = 30.dp,
-                        radius = config.funcCornerRadiusDp.dp,
-                        config = config,
-                        palette = palette,
-                        onClick = onClearAll
-                    ) {
-                        Text("clear", color = palette.secondaryText, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                val activeHasItems = if (pagerState.currentPage == 0) recentClips.isNotEmpty() else pinnedClips.isNotEmpty()
+                val clearAlpha by animateFloatAsState(
+                    targetValue = if (activeHasItems) 1f else 0.35f,
+                    animationSpec = tween(140),
+                    label = "ClearBtnAlpha"
+                )
+                FuncKeyCap(
+                    modifier = Modifier.width(52.dp).graphicsLayer { alpha = clearAlpha },
+                    height = 32.dp,
+                    radius = config.funcCornerRadiusDp.dp,
+                    config = config,
+                    palette = palette,
+                    onClick = {
+                        if (activeHasItems) {
+                            if (pagerState.currentPage == 0) onClearAll() else onClearPinned()
+                        }
                     }
+                ) {
+                    Text("clear", color = palette.secondaryText, fontSize = 12.sp, fontWeight = FontWeight.Medium)
                 }
                 FuncKeyCap(
-                    modifier = Modifier.width(56.dp),
-                    height = 30.dp,
+                    modifier = Modifier.width(52.dp),
+                    height = 32.dp,
                     radius = config.funcCornerRadiusDp.dp,
                     config = config,
                     palette = palette,
@@ -1265,56 +1379,306 @@ private fun ClipboardPanel(
             }
         }
 
-        if (clips.isEmpty()) {
+        HorizontalPager(
+            state = pagerState,
+            userScrollEnabled = false,
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f)
+                .padding(top = 6.dp)
+        ) { page ->
+            val list = if (page == 0) recentClips else pinnedClips
+            if (list.isEmpty()) {
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = if (page == 1) "hold any clip to pin" else "clipboard is empty",
+                        color = palette.secondaryText,
+                        fontSize = 13.sp
+                    )
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    items(list, key = { "${page}_$it" }) { item ->
+                        val isPinned = item in pinnedClips
+                        val haptic = androidx.compose.ui.platform.LocalHapticFeedback.current
+                        var dragX by remember(item) { mutableFloatStateOf(0f) }
+                        var isDragging by remember(item) { mutableStateOf(false) }
+                        var wasArmed by remember(item) { mutableStateOf(false) }
+                        val deleteThresholdPx = with(density) { 96.dp.toPx() }
+                        val maxSwipePx = with(density) { 132.dp.toPx() }
+                        val animatedOffsetX by animateFloatAsState(
+                            targetValue = if (isDragging) dragX else 0f,
+                            animationSpec = if (isDragging) {
+                                spring(dampingRatio = 0.95f, stiffness = Spring.StiffnessHigh)
+                            } else {
+                                spring(dampingRatio = 0.78f, stiffness = Spring.StiffnessMedium)
+                            },
+                            label = "ClipSwipeX"
+                        )
+                        val progress = (animatedOffsetX / deleteThresholdPx).coerceIn(0f, 1f)
+                        val isArmed = dragX >= deleteThresholdPx
+                        val contentAlpha = ((progress - 0.12f) / 0.88f).coerceIn(0f, 1f)
+                        val contentScale by animateFloatAsState(
+                            targetValue = if (isArmed) 1.06f else (0.85f + 0.15f * progress),
+                            animationSpec = spring(dampingRatio = 0.72f, stiffness = Spring.StiffnessMedium),
+                            label = "ClipDelScale"
+                        )
+                        val frostedRedBrush = remember(isArmed) {
+                            Brush.verticalGradient(
+                                listOf(
+                                    Color(0xFFBA4440).copy(alpha = if (isArmed) 0.88f else 0.68f),
+                                    Color(0xFF93302C).copy(alpha = if (isArmed) 0.92f else 0.76f)
+                                )
+                            )
+                        }
+
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(palette.keyBackground)
+                                .pointerInput(item, page) {
+                                    detectHorizontalDragGestures(
+                                        onDragStart = {
+                                            isDragging = true
+                                            wasArmed = false
+                                            dragX = 0f
+                                        },
+                                        onDragEnd = {
+                                            val triggered = dragX >= deleteThresholdPx
+                                            isDragging = false
+                                            wasArmed = false
+                                            dragX = 0f
+                                            if (triggered) {
+                                                if (page == 0) onRemove(item) else onRemovePinned(item)
+                                            }
+                                        },
+                                        onDragCancel = {
+                                            isDragging = false
+                                            wasArmed = false
+                                            dragX = 0f
+                                        },
+                                        onHorizontalDrag = { change, dragAmount ->
+                                            if (dragX + dragAmount > 0f || dragX > 0f) {
+                                                change.consume()
+                                                dragX = (dragX + dragAmount).coerceIn(0f, maxSwipePx)
+                                                val armedNow = dragX >= deleteThresholdPx
+                                                if (armedNow != wasArmed) {
+                                                    wasArmed = armedNow
+                                                    haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.TextHandleMove)
+                                                }
+                                            }
+                                        }
+                                    )
+                                },
+                            contentAlignment = Alignment.CenterStart
+                        ) {
+                            // Seamless frosted red reveal on the left (zero gap, matches card height & corner)
+                            if (animatedOffsetX > 1f) {
+                                Box(
+                                    modifier = Modifier
+                                        .matchParentSize()
+                                        .background(frostedRedBrush)
+                                        .border(
+                                            width = 0.6.dp,
+                                            color = Color.White.copy(alpha = 0.14f),
+                                            shape = RoundedCornerShape(14.dp)
+                                        )
+                                        .padding(horizontal = 14.dp),
+                                    contentAlignment = Alignment.CenterStart
+                                ) {
+                                    Row(
+                                        modifier = Modifier.graphicsLayer {
+                                            alpha = contentAlpha
+                                            scaleX = contentScale
+                                            scaleY = contentScale
+                                        },
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(5.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.DeleteOutline,
+                                            contentDescription = "delete",
+                                            tint = Color.White.copy(alpha = 0.92f),
+                                            modifier = Modifier.size(17.dp)
+                                        )
+                                        Text(
+                                            text = "delete",
+                                            color = Color.White.copy(alpha = 0.92f),
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            maxLines = 1
+                                        )
+                                    }
+                                }
+                            }
+
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .graphicsLayer { translationX = animatedOffsetX }
+                                    .background(palette.keyBackground)
+                                    .combinedClickable(
+                                        onClick = { onPaste(item) },
+                                        onLongClick = { onTogglePin(item) }
+                                    )
+                                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = item,
+                                    color = palette.keyText,
+                                    fontSize = 14.sp,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                if (isPinned) {
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Box(
+                                        modifier = Modifier
+                                            .size(7.dp)
+                                            .clip(CircleShape)
+                                            .background(palette.accent)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ClipboardFrostedTabPill(
+    labels: List<String>,
+    selectedIndex: Int,
+    palette: KeyboardPalette,
+    onSelect: (Int) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val density = LocalDensity.current
+    val count = labels.size.coerceAtLeast(1)
+    val latestOnSelect by rememberUpdatedState(onSelect)
+    var trackWidthPx by remember { mutableIntStateOf(0) }
+    var isDragging by remember { mutableStateOf(false) }
+    var dragFraction by remember(selectedIndex) { mutableFloatStateOf(selectedIndex.toFloat()) }
+
+    val padPx = with(density) { 2.5.dp.toPx() }
+    val innerW = (trackWidthPx - padPx * 2f).coerceAtLeast(1f)
+    val segW = innerW / count.toFloat()
+
+    val animIdx by animateFloatAsState(
+        targetValue = if (isDragging) dragFraction else selectedIndex.toFloat(),
+        animationSpec = if (isDragging) {
+            spring(dampingRatio = 0.95f, stiffness = Spring.StiffnessHigh)
+        } else {
+            spring(dampingRatio = 0.86f, stiffness = 480f)
+        },
+        label = "ClipTabPos"
+    )
+    val pillScale by animateFloatAsState(
+        targetValue = if (isDragging) 1.04f else 1f,
+        animationSpec = spring(dampingRatio = 0.85f, stiffness = Spring.StiffnessMedium),
+        label = "ClipTabScale"
+    )
+
+    val pillBrush = remember(palette.keyBackground) {
+        Brush.verticalGradient(
+            listOf(
+                palette.keyBackground.copy(alpha = 0.95f),
+                palette.funcKeyBackground.copy(alpha = 0.90f)
+            )
+        )
+    }
+
+    Box(
+        modifier = modifier
+            .height(32.dp)
+            .clip(CircleShape)
+            .background(palette.funcKeyBackground.copy(alpha = 0.65f))
+            .border(0.6.dp, palette.divider, CircleShape)
+            .onSizeChanged { trackWidthPx = it.width }
+            .pointerInput(count) {
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    down.consume()
+                    val curInner = (trackWidthPx - padPx * 2f).coerceAtLeast(1f)
+                    val curSegW = curInner / count.toFloat()
+                    val downX = down.position.x
+                    val touchSlop = viewConfiguration.touchSlop
+                    var startedDrag = false
+
+                    try {
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                            if (!change.pressed) {
+                                val chosen = ((change.position.x - padPx) / curSegW).toInt().coerceIn(0, count - 1)
+                                latestOnSelect(chosen)
+                                break
+                            }
+                            if (!startedDrag && abs(change.position.x - downX) > touchSlop) {
+                                startedDrag = true
+                                isDragging = true
+                            }
+                            if (startedDrag) {
+                                change.consume()
+                                dragFraction = ((change.position.x - padPx - curSegW * 0.5f) / curSegW)
+                                    .coerceIn(0f, (count - 1).toFloat())
+                            }
+                        }
+                    } finally {
+                        isDragging = false
+                    }
+                }
+            }
+            .padding(2.5.dp)
+    ) {
+        if (trackWidthPx > 0) {
+            val pillW = with(density) { segW.toDp() }
             Box(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f),
-                contentAlignment = Alignment.Center
-            ) {
-                Text("clipboard is empty", color = palette.secondaryText, fontSize = 14.sp)
-            }
-        } else {
-            LazyColumn(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f)
-                    .padding(top = 4.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                items(clips, key = { it }) { item ->
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(10.dp))
-                            .background(palette.keyBackground)
-                            .pointerInput(item) {
-                                detectTapGestures(onTap = { onPaste(item) })
-                            }
-                            .padding(horizontal = 12.dp, vertical = 10.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = item,
-                            color = palette.keyText,
-                            fontSize = 14.sp,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f)
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Icon(
-                            imageVector = Icons.Rounded.Close,
-                            contentDescription = "remove",
-                            tint = palette.secondaryText,
-                            modifier = Modifier
-                                .size(18.dp)
-                                .pointerInput(item) {
-                                    detectTapGestures(onTap = { onRemove(item) })
-                                }
-                        )
+                    .width(pillW)
+                    .fillMaxHeight()
+                    .graphicsLayer {
+                        translationX = animIdx * segW
+                        scaleX = pillScale
+                        scaleY = pillScale
                     }
+                    .clip(CircleShape)
+                    .background(pillBrush)
+                    .border(0.7.dp, Color.White.copy(alpha = 0.22f), CircleShape)
+            )
+        }
+
+        val activeIdx = if (isDragging) dragFraction.roundToInt().coerceIn(0, count - 1) else selectedIndex
+        Row(
+            modifier = Modifier.fillMaxSize().zIndex(1f),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            labels.forEachIndexed { idx, title ->
+                val isCur = idx == activeIdx
+                Box(
+                    modifier = Modifier.weight(1f).fillMaxHeight(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = title,
+                        color = if (isCur) palette.keyText else palette.secondaryText,
+                        fontSize = 12.sp,
+                        fontWeight = if (isCur) FontWeight.SemiBold else FontWeight.Medium,
+                        maxLines = 1
+                    )
                 }
             }
         }
@@ -1460,10 +1824,16 @@ private fun CharKeyCap(
                 ),
             contentAlignment = Alignment.Center
         ) {
+            val fittedFontSp = when {
+                label.length <= 1 -> fontSizeSp
+                label.length == 2 -> (fontSizeSp * 0.78f).coerceAtLeast(13f)
+                label.length == 3 -> (fontSizeSp * 0.62f).coerceAtLeast(11f)
+                else -> (fontSizeSp * 0.50f).coerceIn(9.5f, 12.5f)
+            }
             Text(
                 text = label,
                 color = palette.keyText,
-                fontSize = fontSizeSp.sp,
+                fontSize = fittedFontSp.sp,
                 fontWeight = FontWeight.Normal,
                 fontFamily = fontFamily,
                 textAlign = TextAlign.Center,
@@ -1848,8 +2218,11 @@ private fun BackspaceKeyCap(
                         down.consume()
                         pressed = true
                         onBackspace()
-                        waitForUpOrCancellation()
-                        pressed = false
+                        try {
+                            waitForUpOrCancellation()
+                        } finally {
+                            pressed = false
+                        }
                     }
                 },
             contentAlignment = Alignment.Center
@@ -2119,3 +2492,173 @@ private fun IosEmojiPickerPanel(
 }
 
 
+
+
+@Composable
+private fun CandidateStrip(
+    candidates: List<String>,
+    palette: KeyboardPalette,
+    fontFamily: FontFamily,
+    onCandidateClick: (String) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(34.dp),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        candidates.take(3).forEachIndexed { idx, cand ->
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxHeight()
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(if (idx == 0) palette.funcKeyBackground else Color.Transparent)
+                    .pointerInput(cand) {
+                        detectTapGestures(onTap = { onCandidateClick(cand) })
+                    }
+                    .padding(horizontal = 6.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = cand,
+                    color = if (idx == 0) palette.keyText else palette.secondaryText,
+                    fontSize = 14.sp,
+                    fontWeight = if (idx == 0) FontWeight.SemiBold else FontWeight.Normal,
+                    fontFamily = fontFamily,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun CompactTopBarButton(
+    id: String,
+    selected: Boolean,
+    config: KeyboardConfig,
+    palette: KeyboardPalette,
+    onClick: () -> Unit
+) {
+    val icon: ImageVector = when (id) {
+        "EMOJI" -> KeyboardIcons.Emoji
+        "CLIPBOARD" -> KeyboardIcons.Clipboard
+        "SELECT_ALL" -> KeyboardIcons.SelectAll
+        "COPY" -> KeyboardIcons.Copy
+        "PASTE" -> KeyboardIcons.Paste
+        "CUT" -> Icons.Rounded.ContentCut
+        "UNDO" -> Icons.AutoMirrored.Rounded.Undo
+        else -> Icons.Rounded.MoreHoriz
+    }
+    val shape = remember(config.funcCornerRadiusDp) { RoundedCornerShape(config.funcCornerRadiusDp.dp) }
+    Box(
+        modifier = Modifier
+            .size(34.dp)
+            .clip(shape)
+            .background(if (selected) palette.accent else palette.funcKeyBackground)
+            .pointerInput(id) {
+                detectTapGestures(onTap = { onClick() })
+            },
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = id.lowercase(),
+            tint = if (selected) palette.accentText else palette.keyText,
+            modifier = Modifier.size(18.dp)
+        )
+    }
+}
+
+@Composable
+private fun GridLetterKeyCap(
+    modifier: Modifier,
+    label: String,
+    alts: List<String>,
+    uppercaseAlts: Boolean,
+    height: Dp,
+    fontSizeSp: Float,
+    fontFamily: FontFamily,
+    palette: KeyboardPalette,
+    showAlts: Boolean,
+    altsSelectedIdx: Int,
+    onDismissAlts: () -> Unit,
+    onBoundsChanged: (Rect) -> Unit,
+    onCommitAlt: (String) -> Unit
+) {
+    val density = LocalDensity.current
+    val fittedFontSp = when {
+        label.length <= 1 -> fontSizeSp
+        label.length == 2 -> (fontSizeSp * 0.78f).coerceAtLeast(13f)
+        label.length == 3 -> (fontSizeSp * 0.62f).coerceAtLeast(11f)
+        else -> (fontSizeSp * 0.50f).coerceIn(9.5f, 12.5f)
+    }
+
+    Box(
+        modifier = modifier
+            .height(height)
+            .onGloballyPositioned { coords -> onBoundsChanged(coords.boundsInRoot()) },
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text = label,
+            color = palette.keyText,
+            fontSize = fittedFontSp.sp,
+            fontWeight = FontWeight.Normal,
+            fontFamily = fontFamily,
+            textAlign = TextAlign.Center,
+            maxLines = 1,
+            softWrap = false
+        )
+
+        if (showAlts && alts.isNotEmpty()) {
+            val altOffsetY = with(density) { (-52).dp.roundToPx() }
+            Popup(
+                alignment = Alignment.TopCenter,
+                offset = IntOffset(0, altOffsetY),
+                onDismissRequest = onDismissAlts,
+                properties = PopupProperties(focusable = false, clippingEnabled = false)
+            ) {
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(palette.popupBackground)
+                        .border(0.8.dp, palette.divider, RoundedCornerShape(12.dp))
+                        .padding(4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    alts.forEachIndexed { idx, rawAlt ->
+                        val alt = if (uppercaseAlts) rawAlt.uppercase() else rawAlt
+                        val isSel = idx == altsSelectedIdx
+                        Box(
+                            modifier = Modifier
+                                .size(38.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(if (isSel) palette.accent else Color.Transparent)
+                                .pointerInput(alt) {
+                                    detectTapGestures(onTap = {
+                                        onCommitAlt(alt)
+                                        onDismissAlts()
+                                    })
+                                },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = alt,
+                                color = if (isSel) palette.accentText else palette.popupText,
+                                fontSize = 20.sp,
+                                fontFamily = fontFamily,
+                                maxLines = 1,
+                                softWrap = false
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

@@ -68,7 +68,7 @@ fun TextExpanderSheet(
 
             if (snippets.isEmpty()) {
                 Surface(
-                    shape = RoundedCornerShape(18.dp),
+                    shape = SereneTokens.InnerShape,
                     color = MaterialTheme.colorScheme.surfaceContainer
                 ) {
                     Column(
@@ -84,14 +84,13 @@ fun TextExpanderSheet(
                             fontSize = 12.sp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
-                        Button(
+                        FilledTonalIconButton(
                             onClick = {
                                 editing = null
                                 showForm = true
-                            },
-                            shape = RoundedCornerShape(12.dp)
+                            }
                         ) {
-                            Text("add snippet")
+                            Icon(Icons.Rounded.Add, contentDescription = "add snippet")
                         }
                     }
                 }
@@ -99,7 +98,7 @@ fun TextExpanderSheet(
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     snippets.forEach { item ->
                         Surface(
-                            shape = RoundedCornerShape(18.dp),
+                            shape = SereneTokens.InnerShape,
                             color = MaterialTheme.colorScheme.surfaceContainer
                         ) {
                             Row(
@@ -174,7 +173,7 @@ fun TextExpanderSheet(
                         onValueChange = { trigger = it.replace(" ", "") },
                         label = { Text("trigger") },
                         singleLine = true,
-                        shape = RoundedCornerShape(12.dp),
+                        shape = SereneTokens.SmallShape,
                         modifier = Modifier.fillMaxWidth()
                     )
                     OutlinedTextField(
@@ -183,7 +182,7 @@ fun TextExpanderSheet(
                         label = { Text("expansion") },
                         minLines = 2,
                         maxLines = 6,
-                        shape = RoundedCornerShape(12.dp),
+                        shape = SereneTokens.SmallShape,
                         modifier = Modifier.fillMaxWidth()
                     )
                     Row(
@@ -223,7 +222,7 @@ fun TextExpanderSheet(
                         )
                         showForm = false
                     },
-                    shape = RoundedCornerShape(12.dp)
+                    shape = SereneTokens.SmallShape
                 ) {
                     Text("save")
                 }

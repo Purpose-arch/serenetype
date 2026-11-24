@@ -197,6 +197,7 @@ object SettingsBackupManager {
             "theme_mode" -> runCatching { ThemeMode.valueOf(value) }.isSuccess
             "font_style" -> runCatching { KeyFontStyle.valueOf(value) }.isSuccess
             "smart_tap_mode" -> runCatching { SmartTapMode.valueOf(value) }.isSuccess
+            "candidate_bar_mode" -> runCatching { CandidateBarMode.valueOf(value) }.isSuccess
             else -> true
         }
     }

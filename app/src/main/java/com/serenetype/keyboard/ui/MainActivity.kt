@@ -1,6 +1,7 @@
 package com.serenetype.keyboard.ui
 
 import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
@@ -49,6 +50,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import com.serenetype.keyboard.data.*
+import com.serenetype.keyboard.ime.KeyboardIcons
 import com.serenetype.keyboard.theme.KeyboardPalette
 import com.serenetype.keyboard.theme.KeyboardThemeEngine
 import kotlinx.coroutines.launch
@@ -58,7 +60,8 @@ private enum class SettingsRoute(val title: String) {
     THEMES("themes"),
     APPEARANCE("appearance"),
     LAYOUT("layout"),
-    TYPING("typing")
+    TYPING("typing"),
+    ABOUT("about")
 }
 
 class MainActivity : ComponentActivity() {
@@ -126,7 +129,6 @@ private fun SereneSettingsApp(
     var testText by remember { mutableStateOf("") }
     var editingTheme by remember { mutableStateOf<CustomThemeSpec?>(null) }
     var showEditor by remember { mutableStateOf(false) }
-    var showSymbolEditor by remember { mutableStateOf(false) }
     var showTextExpander by remember { mutableStateOf(false) }
 
     var hasEnExt by remember { mutableStateOf(dictionary.hasExtendedDict("en")) }
@@ -171,6 +173,8 @@ private fun SereneSettingsApp(
                     SettingsBackupManager.importBackupJson(context, raw)
                 }.getOrNull()
                 if (res != null) {
+                    dictionary.reloadUserData()
+                    userWordCount = dictionary.getUserWordCount()
                     val msg = if (res.skippedPreferences > 0) {
                         "restored ${res.appliedPreferences} settings · ${res.skippedPreferences} skipped"
                     } else {
@@ -271,7 +275,7 @@ private fun SereneSettingsApp(
                             item {
                                 Surface(
                                     color = MaterialTheme.colorScheme.secondaryContainer,
-                                    shape = RoundedCornerShape(22.dp),
+                                    shape = SereneTokens.OuterShape,
                                     modifier = Modifier.animateContentSize(spring())
                                 ) {
                                     Column(
@@ -283,7 +287,7 @@ private fun SereneSettingsApp(
                                             Button(
                                                 onClick = { context.startActivity(Intent(Settings.ACTION_INPUT_METHOD_SETTINGS)) },
                                                 modifier = Modifier.weight(1f),
-                                                shape = RoundedCornerShape(14.dp)
+                                                shape = SereneTokens.InnerShape
                                             ) {
                                                 Text(if (isEnabled) "1. enabled" else "1. enable")
                                             }
@@ -293,7 +297,7 @@ private fun SereneSettingsApp(
                                                     refreshImeStatus()
                                                 },
                                                 modifier = Modifier.weight(1f),
-                                                shape = RoundedCornerShape(14.dp)
+                                                shape = SereneTokens.InnerShape
                                             ) {
                                                 Text(if (isSelected) "2. selected" else "2. select")
                                             }
@@ -310,7 +314,7 @@ private fun SereneSettingsApp(
                                     onValueChange = { testText = it },
                                     placeholder = { Text("type here...") },
                                     singleLine = true,
-                                    shape = RoundedCornerShape(18.dp),
+                                    shape = SereneTokens.InnerShape,
                                     modifier = Modifier
                                         .fillMaxWidth()
                                         .padding(bottom = 4.dp)
@@ -320,7 +324,7 @@ private fun SereneSettingsApp(
 
                         item {
                             Surface(
-                                shape = RoundedCornerShape(22.dp),
+                                shape = SereneTokens.OuterShape,
                                 color = MaterialTheme.colorScheme.surfaceContainerLow
                             ) {
                                 Column {
@@ -351,6 +355,13 @@ private fun SereneSettingsApp(
                                         subtitle = config.enabledLanguages.joinToString(", ") { KeyboardLayouts.languages[it]?.displayName ?: it },
                                         onClick = { route = SettingsRoute.TYPING }
                                     )
+                                    HorizontalDivider(thickness = 0.5.dp, color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+                                    CleanNavRow(
+                                        icon = Icons.Rounded.Info,
+                                        title = "about",
+                                        subtitle = "version & links",
+                                        onClick = { route = SettingsRoute.ABOUT }
+                                    )
                                 }
                             }
                         }
@@ -358,7 +369,7 @@ private fun SereneSettingsApp(
                         item {
                             Surface(
                                 modifier = Modifier.fillMaxWidth(),
-                                shape = RoundedCornerShape(22.dp),
+                                shape = SereneTokens.OuterShape,
                                 color = MaterialTheme.colorScheme.surfaceContainerLow
                             ) {
                                 Column(
@@ -375,14 +386,14 @@ private fun SereneSettingsApp(
                                         FilledTonalButton(
                                             onClick = { exportLauncher.launch("serenetype-backup.json") },
                                             modifier = Modifier.weight(1f),
-                                            shape = RoundedCornerShape(14.dp)
+                                            shape = SereneTokens.InnerShape
                                         ) {
                                             Text("export")
                                         }
                                         Button(
                                             onClick = { importLauncher.launch(arrayOf("application/json", "text/plain", "*/*")) },
                                             modifier = Modifier.weight(1f),
-                                            shape = RoundedCornerShape(14.dp)
+                                            shape = SereneTokens.InnerShape
                                         ) {
                                             Text("import")
                                         }
@@ -429,7 +440,7 @@ private fun SereneSettingsApp(
                                                 Text(mode.label, fontWeight = FontWeight.Medium)
                                                 Text(mode.subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                             }
-                                            RadioButton(selected = active, onClick = { scope.launch { repository.setThemeMode(mode) } })
+                                            LiquidGlassRadioButton(selected = active, onClick = { scope.launch { repository.setThemeMode(mode) } })
                                         }
                                     }
                                 }
@@ -437,60 +448,88 @@ private fun SereneSettingsApp(
                         }
 
                         item {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
+                            Surface(
+                                shape = SereneTokens.OuterShape,
+                                color = MaterialTheme.colorScheme.surfaceContainerLow,
+                                modifier = Modifier.fillMaxWidth().animateContentSize(spring())
                             ) {
-                                Text("custom themes", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
-                                FilledTonalButton(
-                                    onClick = {
-                                        editingTheme = null
-                                        showEditor = true
-                                    },
-                                    shape = RoundedCornerShape(14.dp)
+                                Column(
+                                    modifier = Modifier.padding(16.dp),
+                                    verticalArrangement = Arrangement.spacedBy(10.dp)
                                 ) {
-                                    Text("new")
-                                }
-                            }
-                            Spacer(modifier = Modifier.height(6.dp))
-                            Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                                config.customThemes.forEachIndexed { idx, custom ->
-                                    val active = config.themeMode == ThemeMode.CUSTOM && config.activeCustomThemeId == custom.id
-                                    Surface(
-                                        onClick = { scope.launch { repository.selectCustomTheme(custom.id) } },
-                                        shape = expressiveShape(idx, config.customThemes.size),
-                                        color = if (active) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceContainerLow
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
                                     ) {
-                                        Row(
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .padding(horizontal = 16.dp, vertical = 12.dp),
-                                            horizontalArrangement = Arrangement.SpaceBetween,
-                                            verticalAlignment = Alignment.CenterVertically
+                                        Text("custom themes", fontWeight = FontWeight.Medium)
+                                        FilledTonalIconButton(
+                                            onClick = {
+                                                editingTheme = null
+                                                showEditor = true
+                                            },
+                                            modifier = Modifier.size(34.dp)
                                         ) {
-                                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                                                Box(
-                                                    modifier = Modifier
-                                                        .size(28.dp)
-                                                        .clip(CircleShape)
-                                                        .background(KeyboardThemeEngine.parseHexColor(custom.accentColorHex, Color.Blue))
-                                                )
-                                                Column {
-                                                    Text(custom.name, fontWeight = FontWeight.Medium)
-                                                    Text(custom.trayColorHex, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                            Icon(Icons.Rounded.Add, contentDescription = "add theme", modifier = Modifier.size(19.dp))
+                                        }
+                                    }
+                                    HorizontalDivider(
+                                        thickness = 0.5.dp,
+                                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f)
+                                    )
+                                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                        config.customThemes.forEach { custom ->
+                                            val active = config.themeMode == ThemeMode.CUSTOM && config.activeCustomThemeId == custom.id
+                                            Row(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .clip(SereneTokens.InnerShape)
+                                                    .background(
+                                                        if (active) MaterialTheme.colorScheme.secondaryContainer
+                                                        else MaterialTheme.colorScheme.surfaceContainer
+                                                    )
+                                                    .clickable { scope.launch { repository.selectCustomTheme(custom.id) } }
+                                                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                                                horizontalArrangement = Arrangement.SpaceBetween,
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Row(
+                                                    modifier = Modifier.weight(1f),
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                                                ) {
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .size(26.dp)
+                                                            .clip(CircleShape)
+                                                            .background(KeyboardThemeEngine.parseHexColor(custom.accentColorHex, Color.Blue))
+                                                    )
+                                                    Column {
+                                                        Text(custom.name.lowercase(), fontWeight = FontWeight.Medium)
+                                                        Text(
+                                                            custom.trayColorHex.lowercase(),
+                                                            style = MaterialTheme.typography.bodySmall,
+                                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                        )
+                                                    }
                                                 }
-                                            }
-                                            Row {
-                                                IconButton(onClick = {
-                                                    editingTheme = custom
-                                                    showEditor = true
-                                                }) {
-                                                    Icon(Icons.Rounded.Edit, contentDescription = "edit")
-                                                }
-                                                if (config.customThemes.size > 1) {
-                                                    IconButton(onClick = { scope.launch { repository.deleteCustomTheme(custom.id) } }) {
-                                                        Icon(Icons.Rounded.DeleteOutline, contentDescription = "delete")
+                                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                                    IconButton(
+                                                        onClick = {
+                                                            editingTheme = custom
+                                                            showEditor = true
+                                                        },
+                                                        modifier = Modifier.size(34.dp)
+                                                    ) {
+                                                        Icon(Icons.Rounded.Edit, contentDescription = "edit", modifier = Modifier.size(18.dp))
+                                                    }
+                                                    if (config.customThemes.size > 1) {
+                                                        IconButton(
+                                                            onClick = { scope.launch { repository.deleteCustomTheme(custom.id) } },
+                                                            modifier = Modifier.size(34.dp)
+                                                        ) {
+                                                            Icon(Icons.Rounded.DeleteOutline, contentDescription = "delete", modifier = Modifier.size(18.dp))
+                                                        }
                                                     }
                                                 }
                                             }
@@ -508,6 +547,7 @@ private fun SereneSettingsApp(
                     var hGapDraft by remember(config.horizontalGapDp) { mutableFloatStateOf(config.horizontalGapDp) }
                     var vGapDraft by remember(config.verticalGapDp) { mutableFloatStateOf(config.verticalGapDp) }
                     var textSizeDraft by remember(config.keyTextSizeSp) { mutableFloatStateOf(config.keyTextSizeSp) }
+                    var slidersExpanded by remember { mutableStateOf(false) }
 
                     val previewConfig = remember(
                         config,
@@ -541,52 +581,52 @@ private fun SereneSettingsApp(
                         }
 
                         item {
-                            Surface(
-                                shape = RoundedCornerShape(22.dp),
-                                color = MaterialTheme.colorScheme.surfaceContainerLow
+                            ExpandableGlassSection(
+                                title = "size & spacing",
+                                summary = "${cornerRadiusDraft.toInt()} dp radius · ${hGapDraft.toInt()} dp gap · ${textSizeDraft.toInt()} sp",
+                                expanded = slidersExpanded,
+                                onToggle = { slidersExpanded = !slidersExpanded }
                             ) {
-                                Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    SliderItem(
-                                        title = "key radius",
-                                        valueText = "${cornerRadiusDraft.toInt()} dp",
-                                        value = cornerRadiusDraft,
-                                        range = 0f..20f,
-                                        onChange = { cornerRadiusDraft = it },
-                                        onChangeFinished = { scope.launch { repository.setFloat("cornerRadius", cornerRadiusDraft) } }
-                                    )
-                                    SliderItem(
-                                        title = "func radius",
-                                        valueText = "${funcCornerRadiusDraft.toInt()} dp",
-                                        value = funcCornerRadiusDraft,
-                                        range = 0f..20f,
-                                        onChange = { funcCornerRadiusDraft = it },
-                                        onChangeFinished = { scope.launch { repository.setFloat("funcCornerRadius", funcCornerRadiusDraft) } }
-                                    )
-                                    SliderItem(
-                                        title = "horizontal gap",
-                                        valueText = "${hGapDraft.toInt()} dp",
-                                        value = hGapDraft,
-                                        range = 1f..8f,
-                                        onChange = { hGapDraft = it },
-                                        onChangeFinished = { scope.launch { repository.setFloat("hGap", hGapDraft) } }
-                                    )
-                                    SliderItem(
-                                        title = "vertical gap",
-                                        valueText = "${vGapDraft.toInt()} dp",
-                                        value = vGapDraft,
-                                        range = 2f..14f,
-                                        onChange = { vGapDraft = it },
-                                        onChangeFinished = { scope.launch { repository.setFloat("vGap", vGapDraft) } }
-                                    )
-                                    SliderItem(
-                                        title = "font size",
-                                        valueText = "${textSizeDraft.toInt()} sp",
-                                        value = textSizeDraft,
-                                        range = 16f..30f,
-                                        onChange = { textSizeDraft = it },
-                                        onChangeFinished = { scope.launch { repository.setFloat("textSize", textSizeDraft) } }
-                                    )
-                                }
+                                SliderItem(
+                                    title = "key radius",
+                                    valueText = "${cornerRadiusDraft.toInt()} dp",
+                                    value = cornerRadiusDraft,
+                                    range = 0f..20f,
+                                    onChange = { cornerRadiusDraft = it },
+                                    onChangeFinished = { scope.launch { repository.setFloat("cornerRadius", cornerRadiusDraft) } }
+                                )
+                                SliderItem(
+                                    title = "func radius",
+                                    valueText = "${funcCornerRadiusDraft.toInt()} dp",
+                                    value = funcCornerRadiusDraft,
+                                    range = 0f..20f,
+                                    onChange = { funcCornerRadiusDraft = it },
+                                    onChangeFinished = { scope.launch { repository.setFloat("funcCornerRadius", funcCornerRadiusDraft) } }
+                                )
+                                SliderItem(
+                                    title = "horizontal gap",
+                                    valueText = "${hGapDraft.toInt()} dp",
+                                    value = hGapDraft,
+                                    range = 1f..8f,
+                                    onChange = { hGapDraft = it },
+                                    onChangeFinished = { scope.launch { repository.setFloat("hGap", hGapDraft) } }
+                                )
+                                SliderItem(
+                                    title = "vertical gap",
+                                    valueText = "${vGapDraft.toInt()} dp",
+                                    value = vGapDraft,
+                                    range = 2f..14f,
+                                    onChange = { vGapDraft = it },
+                                    onChangeFinished = { scope.launch { repository.setFloat("vGap", vGapDraft) } }
+                                )
+                                SliderItem(
+                                    title = "font size",
+                                    valueText = "${textSizeDraft.toInt()} sp",
+                                    value = textSizeDraft,
+                                    range = 16f..30f,
+                                    onChange = { textSizeDraft = it },
+                                    onChangeFinished = { scope.launch { repository.setFloat("textSize", textSizeDraft) } }
+                                )
                             }
                         }
 
@@ -607,20 +647,17 @@ private fun SereneSettingsApp(
                         item {
                             Surface(
                                 modifier = Modifier.fillMaxWidth(),
-                                shape = RoundedCornerShape(22.dp),
+                                shape = SereneTokens.OuterShape,
                                 color = MaterialTheme.colorScheme.surfaceContainerLow
                             ) {
                                 Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                     Text("font", fontWeight = FontWeight.Medium)
-                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                        KeyFontStyle.entries.forEach { st ->
-                                            FilterChip(
-                                                selected = config.fontStyle == st,
-                                                onClick = { scope.launch { repository.setFontStyle(st) } },
-                                                label = { Text(st.label, fontSize = 12.sp) }
-                                            )
-                                        }
-                                    }
+                                    LiquidGlassSegmentedRow(
+                                        items = KeyFontStyle.entries,
+                                        selectedItem = config.fontStyle,
+                                        labelProvider = { it.label },
+                                        onSelect = { st -> scope.launch { repository.setFontStyle(st) } }
+                                    )
                                 }
                             }
                         }
@@ -636,7 +673,7 @@ private fun SereneSettingsApp(
                                         }
                                     }
                                 },
-                                shape = RoundedCornerShape(22.dp),
+                                shape = SereneTokens.OuterShape,
                                 color = MaterialTheme.colorScheme.surfaceContainerLow
                             ) {
                                 Row(
@@ -657,7 +694,7 @@ private fun SereneSettingsApp(
                                     when {
                                         downloadingEmojiFont -> CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
                                         hasEmojiFont -> Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                            Text("ready", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Medium, style = MaterialTheme.typography.bodySmall)
+                                            Icon(Icons.Rounded.CheckCircle, contentDescription = "ready", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
                                             IconButton(onClick = {
                                                 scope.launch {
                                                     EmojiFontManager.deleteAppleEmojiFont(context)
@@ -667,7 +704,7 @@ private fun SereneSettingsApp(
                                                 Icon(Icons.Rounded.DeleteOutline, contentDescription = "remove emoji font", modifier = Modifier.size(19.dp))
                                             }
                                         }
-                                        else -> Text("get", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Medium, style = MaterialTheme.typography.bodySmall)
+                                        else -> Icon(Icons.Rounded.Download, contentDescription = "download", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
                                     }
                                 }
                             }
@@ -693,35 +730,11 @@ private fun SereneSettingsApp(
                         }
 
                         item {
-                            Text("symbols", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
-                            Spacer(modifier = Modifier.height(6.dp))
-                            Surface(
-                                onClick = { showSymbolEditor = true },
-                                shape = RoundedCornerShape(22.dp),
-                                color = MaterialTheme.colorScheme.surfaceContainerLow
-                            ) {
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(horizontal = 16.dp, vertical = 14.dp),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Text("symbols (123, #+= & hold 123)", fontWeight = FontWeight.Medium)
-                                        Text(
-                                            text = if (config.quickSymbolPopupEnabled) {
-                                                "pages + quick 123 popup (${config.quickSymbolPopupDelayMs} ms)"
-                                            } else {
-                                                "customize symbol pages"
-                                            },
-                                            fontSize = 12.sp,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                                        )
-                                    }
-                                    Icon(Icons.Rounded.ChevronRight, contentDescription = "open symbol editor", tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                                }
-                            }
+                            InteractiveSymbolEditor(
+                                config = config,
+                                palette = previewPalette,
+                                repository = repository
+                            )
                         }
                     }
                 }
@@ -754,7 +767,7 @@ private fun SereneSettingsApp(
                                             verticalAlignment = Alignment.CenterVertically
                                         ) {
                                             Text(lang.displayName, fontWeight = FontWeight.Medium)
-                                            Checkbox(
+                                            LiquidGlassCheckbox(
                                                 checked = checked,
                                                 onCheckedChange = { scope.launch { repository.toggleLanguage(lang.code) } }
                                             )
@@ -789,7 +802,7 @@ private fun SereneSettingsApp(
                             Spacer(modifier = Modifier.height(10.dp))
                             Surface(
                                 modifier = Modifier.fillMaxWidth(),
-                                shape = RoundedCornerShape(22.dp),
+                                shape = SereneTokens.OuterShape,
                                 color = MaterialTheme.colorScheme.surfaceContainerLow
                             ) {
                                 Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -799,15 +812,25 @@ private fun SereneSettingsApp(
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
-                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                        SmartTapMode.entries.forEach { mode ->
-                                            FilterChip(
-                                                selected = config.smartTapMode == mode,
-                                                onClick = { scope.launch { repository.setSmartTapMode(mode) } },
-                                                label = { Text(mode.label) }
-                                            )
-                                        }
-                                    }
+                                    LiquidGlassSegmentedRow(
+                                        items = SmartTapMode.entries,
+                                        selectedItem = config.smartTapMode,
+                                        labelProvider = { it.label },
+                                        onSelect = { mode -> scope.launch { repository.setSmartTapMode(mode) } }
+                                    )
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    Text("suggestions bar", fontWeight = FontWeight.Medium)
+                                    Text(
+                                        "word candidates above keyboard",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    LiquidGlassSegmentedRow(
+                                        items = CandidateBarMode.entries,
+                                        selectedItem = config.candidateBarMode,
+                                        labelProvider = { it.label },
+                                        onSelect = { mode -> scope.launch { repository.setCandidateBarMode(mode) } }
+                                    )
                                 }
                             }
                         }
@@ -846,11 +869,11 @@ private fun SereneSettingsApp(
                             Spacer(modifier = Modifier.height(6.dp))
                             Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
                                 val dictEntries = listOf(
-                                    Triple("en", "english 50k", hasEnExt),
-                                    Triple("ru", "russian 50k", hasRuExt),
-                                    Triple("fi", "finnish 50k", hasFiExt),
-                                    Triple("de", "german 50k", hasDeExt),
-                                    Triple("uk", "ukrainian 50k", hasUkExt)
+                                    Triple("en", "english", hasEnExt),
+                                    Triple("ru", "russian", hasRuExt),
+                                    Triple("fi", "finnish", hasFiExt),
+                                    Triple("de", "german", hasDeExt),
+                                    Triple("uk", "ukrainian", hasUkExt)
                                 )
                                 dictEntries.forEachIndexed { idx, (code, title, downloaded) ->
                                     DictDownloadRow(
@@ -901,22 +924,116 @@ private fun SereneSettingsApp(
                         if (config.hapticEnabled) {
                             item {
                                 Surface(
-                                    shape = RoundedCornerShape(22.dp),
+                                    shape = SereneTokens.OuterShape,
                                     color = MaterialTheme.colorScheme.surfaceContainerLow,
                                     modifier = Modifier.fillMaxWidth().animateContentSize(spring())
                                 ) {
                                     Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                         Text("haptic strength", fontWeight = FontWeight.Medium)
-                                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                            listOf(1 to "light", 2 to "medium", 3 to "crisp").forEach { (lvl, title) ->
-                                                FilterChip(
-                                                    selected = config.hapticStrength == lvl,
-                                                    onClick = { scope.launch { repository.setHapticStrength(lvl) } },
-                                                    label = { Text(title) }
-                                                )
-                                            }
+                                        val levels = listOf(1 to "light", 2 to "medium", 3 to "crisp")
+                                        val selectedPair = levels.find { it.first == config.hapticStrength } ?: levels[1]
+                                        LiquidGlassSegmentedRow(
+                                            items = levels,
+                                            selectedItem = selectedPair,
+                                            labelProvider = { it.second },
+                                            onSelect = { pair -> scope.launch { repository.setHapticStrength(pair.first) } }
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                SettingsRoute.ABOUT -> {
+                    val versionName = remember(context) {
+                        runCatching {
+                            context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "1.0.16"
+                        }.getOrDefault("1.0.16")
+                    }
+                    val repoUrl = "https://github.com/Purpose-arch/serenetype"
+
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(horizontal = 16.dp),
+                        verticalArrangement = Arrangement.spacedBy(14.dp),
+                        contentPadding = PaddingValues(vertical = 8.dp)
+                    ) {
+                        item {
+                            Surface(
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = SereneTokens.OuterShape,
+                                color = MaterialTheme.colorScheme.surfaceContainerLow
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(18.dp),
+                                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            text = "serenetype",
+                                            style = MaterialTheme.typography.titleLarge,
+                                            fontWeight = FontWeight.SemiBold
+                                        )
+                                        Box(
+                                            modifier = Modifier
+                                                .clip(CircleShape)
+                                                .background(MaterialTheme.colorScheme.secondaryContainer)
+                                                .padding(horizontal = 10.dp, vertical = 4.dp)
+                                        ) {
+                                            Text(
+                                                text = "v$versionName",
+                                                style = MaterialTheme.typography.labelMedium,
+                                                color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                                fontWeight = FontWeight.Medium
+                                            )
                                         }
                                     }
+                                    Text(
+                                        text = "minimalist ios-inspired android keyboard with offline spatial t9, liquid glass settings and zero tracking.",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                        }
+
+                        item {
+                            Surface(
+                                onClick = {
+                                    runCatching {
+                                        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(repoUrl)))
+                                    }
+                                },
+                                shape = SereneTokens.OuterShape,
+                                color = MaterialTheme.colorScheme.surfaceContainerLow
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 16.dp, vertical = 14.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text("github", fontWeight = FontWeight.Medium)
+                                        Text(
+                                            text = repoUrl,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.primary
+                                        )
+                                    }
+                                    Icon(
+                                        Icons.Rounded.OpenInNew,
+                                        contentDescription = "open github",
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.size(19.dp)
+                                    )
                                 }
                             }
                         }
@@ -932,31 +1049,6 @@ private fun SereneSettingsApp(
             onDismiss = { showTextExpander = false },
             onSaveSnippet = { snippet -> scope.launch { repository.saveTextSnippet(snippet) } },
             onDeleteSnippet = { id -> scope.launch { repository.deleteTextSnippet(id) } }
-        )
-    }
-
-    if (showSymbolEditor) {
-        SymbolEditorSheet(
-            config = config,
-            palette = previewPalette,
-            onDismiss = { showSymbolEditor = false },
-            onReset = {
-                scope.launch {
-                    repository.resetSymbolRows()
-                    val def = KeyboardConfig()
-                    repository.setBool("quickSymEnabled", def.quickSymbolPopupEnabled)
-                    repository.setQuickSymbolPopup(def.quickSymbolPopupChars, def.quickSymbolPopupDelayMs)
-                }
-            },
-            onSavePages = { s1r1, s1r2, s1r3, s2r1, s2r2, s2r3 ->
-                scope.launch { repository.setSymbolRows(s1r1, s1r2, s1r3, s2r1, s2r2, s2r3) }
-            },
-            onSaveQuickPopup = { enabled, chars, delayMs ->
-                scope.launch {
-                    repository.setBool("quickSymEnabled", enabled)
-                    repository.setQuickSymbolPopup(chars, delayMs)
-                }
-            }
         )
     }
 
@@ -991,9 +1083,9 @@ private fun KeyboardMiniPreview(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(20.dp))
+            .clip(SereneTokens.OuterShape)
             .background(palette.trayBackground)
-            .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(20.dp))
+            .border(1.dp, MaterialTheme.colorScheme.outlineVariant, SereneTokens.OuterShape)
             .padding(horizontal = 10.dp, vertical = 10.dp),
         verticalArrangement = Arrangement.spacedBy(vGap)
     ) {
@@ -1061,17 +1153,22 @@ private fun KeyboardMiniPreview(
                     .background(palette.accent),
                 contentAlignment = Alignment.Center
             ) {
-                Text("↵", color = palette.accentText, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                Icon(
+                    imageVector = KeyboardIcons.Return,
+                    contentDescription = "return",
+                    tint = palette.accentText,
+                    modifier = Modifier.size(18.dp)
+                )
             }
         }
     }
 }
 
 private fun expressiveShape(index: Int, count: Int): Shape {
-    if (count <= 1) return RoundedCornerShape(22.dp)
+    if (count <= 1) return SereneTokens.OuterShape
     return when (index) {
-        0 -> RoundedCornerShape(topStart = 22.dp, topEnd = 22.dp, bottomStart = 6.dp, bottomEnd = 6.dp)
-        count - 1 -> RoundedCornerShape(topStart = 6.dp, topEnd = 6.dp, bottomStart = 22.dp, bottomEnd = 22.dp)
+        0 -> RoundedCornerShape(topStart = SereneTokens.RadiusOuter, topEnd = SereneTokens.RadiusOuter, bottomStart = 6.dp, bottomEnd = 6.dp)
+        count - 1 -> RoundedCornerShape(topStart = 6.dp, topEnd = 6.dp, bottomStart = SereneTokens.RadiusOuter, bottomEnd = SereneTokens.RadiusOuter)
         else -> RoundedCornerShape(6.dp)
     }
 }
@@ -1100,11 +1197,11 @@ private fun DictDownloadRow(
             if (isLoading) {
                 CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
             } else {
-                Text(
-                    text = if (isDownloaded) "ready" else "get",
-                    color = MaterialTheme.colorScheme.primary,
-                    fontWeight = FontWeight.Medium,
-                    style = MaterialTheme.typography.bodySmall
+                Icon(
+                    imageVector = if (isDownloaded) Icons.Rounded.CheckCircle else Icons.Rounded.Download,
+                    contentDescription = if (isDownloaded) "ready" else "download",
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(20.dp)
                 )
             }
         }
